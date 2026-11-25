@@ -1,0 +1,141 @@
+# 定时同步 SubBoost 上游；候选代码只在没有写权限的 job 中运行。
+name: Upstream sync
+
+on:
+  schedule:
+    # 避开整点，减少 GitHub Actions 定时任务被延迟的概率。
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: upstream-sync-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Inspect upstream
+    if: github.repository == 'shenleg/subboost' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      state: ${{ steps.inspect.outputs.state }}
+      report: ${{ steps.inspect.outputs.report }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - name: Check for a sync candidate
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags https://github.com/SubBoost/subboost.git refs/heads/main
+          report=$(node scripts/upstream-sync/plan.mjs "$GITHUB_SHA" FETCH_HEAD)
+          state=$(jq -er '.state' <<< "$report")
+          if [[ "$state" == candidate ]]; then
+            pending=$(node scripts/upstream-sync/publish.mjs pending)
+            if [[ -n "$pending" ]]; then
+              printf '已有待处理的同步 PR：%s\n' "$pending" >> "$GITHUB_STEP_SUMMARY"
+              state=pending
+            fi
+          fi
+          printf 'state=%s\nreport=%s\n' "$state" "$report" >> "$GITHUB_OUTPUT"
+          printf '同步状态：`%s`。\n' "$state" >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: Validate sync candidate
+    needs: plan
+    if: needs.plan.outputs.state == 'candidate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - name: Reproduce and check out the exact candidate
+        env:
+          SYNC_PLAN: ${{ needs.plan.outputs.report }}
+        run: |
+          upstream=$(jq -er '.upstream' <<< "$SYNC_PLAN")
+          candidate=$(jq -er '.candidate' <<< "$SYNC_PLAN")
+          git fetch --no-tags https://github.com/SubBoost/subboost.git "$upstream"
+          actual=$(node scripts/upstream-sync/plan.mjs "$GITHUB_SHA" "$upstream" | jq -er '.candidate')
+          [[ "$actual" == "$candidate" ]]
+          git -c core.hooksPath=/dev/null switch --detach "$candidate"
+      - run: npm ci
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run check:worker
+
+  publish:
+    name: Open sync PR or report
+    needs: [plan, validate]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' &&
+      (needs.plan.outputs.state == 'blocked' ||
+       (needs.plan.outputs.state == 'candidate' &&
+        (needs.validate.result == 'success' || needs.validate.result == 'failure')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      # 保持 checkout 在可信的 main 基线；不 checkout 候选代码，也不执行任何 npm 命令。
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - name: Publish the verified result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_PLAN: ${{ needs.plan.outputs.report }}
+          GATE_RESULT: ${{ needs.validate.result }}
+        run: node scripts/upstream-sync/publish.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+
+  pr-worker-gate:
+    name: Worker PR gate
+    if: github.repository == 'shenleg/subboost' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - run: node --test scripts/upstream-sync/*.test.mjs
+      - run: npm ci
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run check:worker

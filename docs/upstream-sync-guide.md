@@ -1,6 +1,24 @@
 # 上游同步操作手册
 
-本指南供贡献者验证上游同步变更，也提供自动化工具可匹配的路径与契约规则。不实现机器人，不授予发布权限。上游为 [`SubBoost/subboost`](https://github.com/SubBoost/subboost)；原版模型和 Worker 的差异见机器可读 [Parity Map](worker-parity.json)，仓库边界及门禁见[区域清单](upstream-sync-zones.json)。
+上游为 [`SubBoost/subboost`](https://github.com/SubBoost/subboost)；原版模型和 Worker 的差异见机器可读 [Parity Map](worker-parity.json)，仓库边界及门禁见[区域清单](upstream-sync-zones.json)。本指南适用于同步 bot 和接手同步任务的贡献者，不授予发布权限。
+
+## 自动同步
+
+[`Upstream sync`](../.github/workflows/upstream-sync.yml) 在 `shenleg/subboost` 的默认分支 `main` 上，每 6 小时检查上游 `main` 的提交 SHA；也可以在 **Actions → Upstream sync → Run workflow** 手动运行（选择 `main`）。
+
+- **没有新提交**：只记录运行结果，不建 Issue 或 PR。已打开的同步 PR 优先处理，bot 不强推、不覆盖其人工提交。
+- **可以试合并**：例如共享核心的内部修复。bot 从当前 `main` 生成两亲合并提交，在只读 job 上运行 `npm run check:worker`；通过后才开普通 PR，没通过则开带日志链接的草稿 PR，不再重复开 Issue。
+- **需要接手**：Git 冲突、API/Prisma/UI 适配、依赖清单（包括版本更新）、CI 配置、未知共享路径等都不自动裁决。bot 开或更新同一条接手 Issue，列出固定的上游 SHA、改动范围和原因。将 Issue 或失败的草稿 PR 交给维护者或编码 agent；修好后用下文的门禁复验。接手 Issue 在问题解决后由维护者关闭。
+
+**首次启用**：工作流进入 `main` 后，在 **Settings → Actions → General → Workflow permissions** 启用 **Allow GitHub Actions to create and approve pull requests**，让默认 `GITHUB_TOKEN` 能创建 PR。无需配置新密钥；bot 不审批 PR。候选门禁会在提 PR 前自动跑，但这个令牌创建的 PR 可能显示 **Approve workflows to run**，需要有写权限的人点击后才会启动 PR 自带的检查。`Worker PR gate` 用于验证 PR 的最新合并结果，可在分支保护中设为必过检查。
+
+审查后使用 **Create a merge commit**，不要 squash，以保留上游提交历史。bot 不会合入 `main`、打发布标签、调用远端 D1 迁移或部署 Cloudflare。
+
+验证 bot 脚本本身，不需要 GitHub 写权限：
+
+```bash
+node --test scripts/upstream-sync/*.test.mjs
+```
 
 ## 1. 获取并检查上游变更
 
@@ -23,7 +41,7 @@ git diff HEAD...upstream/main
 | 区域 | 裁决 |
 | --- | --- |
 | 上游只读 | `local/`、`packages/`、`.github/` 等采用上游实现；不能为 Worker 修改这些区域。在 Worker 路由、D1 适配、SPA 或 shim 补齐差异。 |
-| Worker 专属 | 保留 `worker/`、根 Wrangler 配置、密钥示例及部署/同步文档；上游如果新增同名文件，暂停并提交人工审查。已经上线的 D1 迁移不改写，按序追加。 |
+| Worker 专属 | 保留 `worker/`、根 Wrangler 配置、密钥示例、部署/同步文档，以及区域清单单独列出的同步工作流和脚本；上游如果新增同名文件，暂停并提交人工审查。已经上线的 D1 迁移不改写，按序追加。 |
 | 共享 | 根 `package.json` 吸收上游变更并重放 Worker 工作区、命令、绑定元数据；保留原版 `local:build`。由 npm 重新生成有冲突的锁文件，再用 `npm ci` 验证。保留 `.gitignore` 的 Wrangler/本地密钥规则。双语 README 采用上游正文，只重放头部 Workers 横幅。其余不明确的冲突转人工。 |
 
 ## 3. 放行门禁
