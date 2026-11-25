@@ -13,15 +13,6 @@ SubBoost Workers 版使用 Workers Static Assets、单个 D1 数据库和原生 
 
 Cloudflare 按钮的资源供给和脚本预填见[官方文档](https://developers.cloudflare.com/workers/platform/deploy-buttons/)。本仓库已在本地验证构建、迁移和请求契约；按钮向导实际替换 D1 ID、首迁移凭证和首发密钥注入仍需获准后的线上验证。
 
-## 导入已有 GitHub 仓库
-
-已有包含 SubBoost 代码的 GitHub 仓库时，用 Cloudflare 控制台导入。这个流程会创建 Worker 并连接现有仓库，不会另建 GitHub 仓库，也不必先用 CLI 发布。
-
-1. 在目标 Cloudflare 账号中创建 D1 数据库。在你的部署分支上修改仓库根目录的 `wrangler.jsonc`：将全零 `database_id` 替换为真实 ID，`database_name` 填实际库名，绑定名保留 `DB`。把配置更新到 GitHub 的部署分支，不要提交回公共模板。部署命令会先运行远端迁移，因此第一次构建就必须能找到这个 D1 库。
-2. 打开 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)，选择 **Create application → Import a repository**，授权 GitHub 后选中已有仓库。在构建设置中选择上一步的分支，根目录保留为仓库根（不要选 `worker/`），构建命令填 `npm run build`，部署命令填 `npm run deploy`，然后选择 **Save and Deploy**。不要使用默认的 `npx wrangler deploy`，它不会先执行迁移。如果迁移报权限不足，检查 Workers Builds 的 API token 是否同时有目标账号的 Worker 部署和 D1 写入权限。
-3. 部署后，在该 Worker 的 **Settings → Variables and Secrets** 添加运行时 **Secret** `ENCRYPTION_KEY`（用 `openssl rand -hex 32` 生成并备份）。不要把密钥提交到 GitHub，也不要只填到 **Build variables and secrets**。如需防止他人抢先初始化，可在启用 `ENCRYPTION_KEY` 时一并添加 `LOCAL_SETUP_TOKEN`。
-4. 打开 `/api/health/ready`，确认返回 `200` 和 `database: "ready"`，再访问 `/login` 创建管理员。后续更新合入 Cloudflare 绑定的生产分支即可触发重新部署，保留原 D1 和运行时密钥。
-
 ## 本地开发（Wrangler）
 
 在仓库根目录，以 `package.json` 的 `engines.node` 为准安装 Node.js 和 npm。
