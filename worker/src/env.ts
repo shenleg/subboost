@@ -41,3 +41,25 @@ export function getEncryptionKey(env: WorkerBindings): string | undefined {
 export function nowMs(env: WorkerBindings): number {
   return env.now?.() ?? Date.now();
 }
+
+/**
+ * 获取 Cookie 和公开链接共用的站点根地址；不信任 Origin 或转发请求头。
+ * @param request Cloudflare Worker 收到的请求。
+ * @param env Worker 绑定；合法 HTTP(S) `APP_URL` 优先。
+ * @returns 不带尾斜杠的 HTTP(S) origin；无效配置回退到请求 URL。
+ */
+export function getSiteOrigin(request: Request, env: WorkerBindings): string {
+  const configured = env.APP_URL && URL.parse(env.APP_URL);
+  if (configured && (configured.protocol === "https:" || configured.protocol === "http:") &&
+    !configured.username && !configured.password) return configured.origin;
+  return new URL(request.url).origin;
+}
+
+/**
+ * 获取限流使用的客户端 IP，只使用 Cloudflare 提供的单一地址。
+ * @param request Cloudflare Worker 收到的请求。
+ * @returns 平台地址；缺失时使用同一个本地桶，不接受可伪造的转发链。
+ */
+export function getClientIp(request: Request): string {
+  return request.headers.get("CF-Connecting-IP")?.trim() || "127.0.0.1";
+}
