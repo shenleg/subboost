@@ -1,10 +1,16 @@
-// Worker CLI 入口；前端静态资源与远程部署脚本由后续工单接入。
+// Worker CLI 入口，托管 Vite 产物并仅将 API 请求交给 Hono。
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "subboost",
   "main": "worker/src/index.ts",
   "compatibility_date": "2026-07-30",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "worker/dist",
+    "not_found_handling": "single-page-application",
+    // 浏览器直接打开公开订阅或健康检查时，也必须得到 API 响应而不是 SPA。
+    "run_worker_first": ["/api", "/api/*"]
+  },
   // 订阅每 6 分钟轮询；规则索引每 6 小时刷新。任务由 #9 接入。
   "triggers": { "crons": ["*/6 * * * *", "0 */6 * * *"] },
   "d1_databases": [
