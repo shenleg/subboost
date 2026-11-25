@@ -13,6 +13,10 @@
 </div>
 <!-- markdownlint-enable MD033 MD041 -->
 
+> **Deploy on Cloudflare Workers (Free)** — No server required. Uses one D1 database and a single required secret, `ENCRYPTION_KEY`. [Deployment guide (中文)](docs/cloudflare-workers.md)
+>
+> [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shenleg/subboost)
+
 **SubBoost** is a **Clash/Mihomo subscription conversion, enhancement, and management** tool. It can convert airport subscriptions and self-hosted nodes into optimized aggregate subscriptions, then update them automatically. With the visual UI, you can configure advanced features such as **chained proxies, precise routing, DNS leak prevention, and multi-subscription aggregation** in one click.
 
 ## Highlights & Use Cases

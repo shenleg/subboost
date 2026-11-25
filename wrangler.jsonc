@@ -11,12 +11,14 @@
     // 浏览器直接打开公开订阅或健康检查时，也必须得到 API 响应而不是 SPA。
     "run_worker_first": ["/api", "/api/*"]
   },
-  // 订阅每 6 分钟轮询；规则索引每 6 小时刷新。任务由 #9 接入。
+  // 高频处理到期订阅，低频刷新规则索引，分开使用每次调用的预算。
   "triggers": { "crons": ["*/6 * * * *", "0 */6 * * *"] },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "subboost",
+      // 全零 UUID 仅用于模板：部署按钮自动替换；CLI 远端部署前手动填入新建库 ID。
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "worker/migrations"
     }
   ]
