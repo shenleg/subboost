@@ -105,7 +105,9 @@ async function derivePassword(password: string, salt: Uint8Array<ArrayBuffer>) {
 async function hashPassword(password: string): Promise<string> {
   // 128 位随机盐确保相同密码也有不同哈希；格式前缀允许独立升级哈希参数。
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  return `${PASSWORD_FORMAT}$${salt.toBase64()}$${(await derivePassword(password, salt)).toBase64()}`;
+  const hash = await derivePassword(password, salt);
+  // Workerd 与项目支持的 Node 24 都提供 btoa；后者尚无 TypedArray Base64 API。
+  return `${PASSWORD_FORMAT}$${btoa(String.fromCharCode(...salt))}$${btoa(String.fromCharCode(...hash))}`;
 }
 
 async function verifyPassword(password: string, stored: string): Promise<boolean> {
@@ -113,8 +115,8 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
   if (`${algorithm}$${version}$${rounds}` !== PASSWORD_FORMAT || !serializedSalt || !serializedHash || extra !== undefined) return false;
   let salt: Uint8Array<ArrayBuffer>, expected: Uint8Array<ArrayBuffer>;
   try {
-    salt = Uint8Array.fromBase64(serializedSalt);
-    expected = Uint8Array.fromBase64(serializedHash);
+    salt = Uint8Array.from(atob(serializedSalt), (byte) => byte.charCodeAt(0));
+    expected = Uint8Array.from(atob(serializedHash), (byte) => byte.charCodeAt(0));
   } catch {
     return false;
   }
