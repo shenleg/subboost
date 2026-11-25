@@ -1,8 +1,10 @@
 // 将 Worker 出站传输接到共享订阅刷新核心，供手动刷新和 Cron 共用。
+import { generateClashConfig } from "@subboost/core/generator";
+import { buildGenerateOptionsFromConfig } from "@subboost/core/subscription/config-utils";
 import { SUBSCRIPTION_MAX_PROFILE_REQUESTS } from "@subboost/server-core/subscription/snapshot-comparison";
 import { ExternalFetchBudgetExceededError, MAX_FETCHES_PER_REQUEST, type ExternalFetchBudget } from "./transport";
 import {
-  prepareRefreshCacheResult, refreshNodeSnapshot, SUBSCRIPTION_IMPORT_USER_AGENTS,
+  prepareRefreshCacheSnapshot, refreshNodeSnapshot, SUBSCRIPTION_IMPORT_USER_AGENTS,
   type RefreshNodeSnapshotOptions,
 } from "@subboost/server-core/subscription";
 import type { SubscriptionSecrets } from "./subscription-store";
@@ -48,12 +50,18 @@ export function buildSubscriptionFetchCallbacks(transport: ReturnType<typeof cre
  * 根据冻结快照准备刷新，由调用方决定如何完成和 CAS 提交；本函数不访问 D1。
  * @param secrets 与读取版本配对的解密快照。
  * @param callbacks 可由调度器装饰、缓存或重放的网络回调。
- * @returns 共享快照和缓存准备结果，保留部分来源失败与节点超限信号。
- * @throws 回调抛出的预算拒绝等异常原样传播，不会形成部分刷新结果。
+ * @returns 共享快照和不含 YAML 的缓存准备结果，保留部分来源失败与节点超限信号。
+ * @throws 回调或 Clash 配置构建抛出的异常原样传播，不会提交刷新结果。
  */
 export async function prepareSubscriptionRefresh(secrets: SubscriptionSecrets, callbacks: SubscriptionFetchCallbacks) {
   const snapshot = await refreshNodeSnapshot({ config: secrets.config, urls: secrets.urls, storedNodes: secrets.nodes, ...callbacks });
-  const refreshResult = prepareRefreshCacheResult({ config: secrets.config, snapshot, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
+  const refreshResult = prepareRefreshCacheSnapshot({ config: secrets.config, snapshot, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
+  if (refreshResult.ok) {
+    // 配置构建仍会校验基础 YAML 和分组监听；仅公开下载需要序列化输出。
+    generateClashConfig(buildGenerateOptionsFromConfig(refreshResult.refreshedConfig, {
+      nodes: refreshResult.cacheEntry.nodes, proxyProviders: refreshResult.proxyProviders,
+    }));
+  }
   return { snapshot, refreshResult };
 }
 

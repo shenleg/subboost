@@ -1,7 +1,8 @@
-import type { PreparedRefreshCacheResult } from "./refresh-cache-result";
+// 将刷新快照结果映射为手动刷新 API 的响应。
+import type { PreparedRefreshCacheSnapshot } from "./refresh-cache-result";
 import type { RefreshNodeSnapshotResult } from "./refresh-node-snapshot";
 
-type ManualRefreshFailureResult = Extract<PreparedRefreshCacheResult, { ok: false }>;
+type ManualRefreshFailureResult = Extract<PreparedRefreshCacheSnapshot, { ok: false }>;
 
 export type ManualRefreshFailureResponse = {
   body: {
@@ -59,9 +60,15 @@ export function buildManualRefreshFailureResponse(params: {
   };
 }
 
+/**
+ * 将刷新快照的计数和完成时间转换为手动刷新成功响应。
+ * @param params 订阅 ID、已提交的刷新结果、来源统计和缓存时间。
+ * @returns JSON 响应体，不包含 YAML。
+ * @throws 缓存时间不是有效日期时抛出异常。
+ */
 export function buildManualRefreshSuccessResponseBody(params: {
   subscriptionId: string;
-  refreshResult: Extract<PreparedRefreshCacheResult, { ok: true }>;
+  refreshResult: Extract<PreparedRefreshCacheSnapshot, { ok: true }>;
   snapshot: RefreshNodeSnapshotResult;
   cachedAt: Date;
 }): ManualRefreshSuccessResponseBody {

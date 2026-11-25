@@ -1,5 +1,6 @@
+// 合并订阅源的最新节点并保留管理员的命名和来源归属。
 import { formatNodeNameFromTemplate } from "../node-name-template";
-import { buildNodeContentKey, buildScopedNodeIdentityKey } from "../node-identity";
+import { buildNodeContentKey, buildScopedNodeIdentityKey, type NodeContentKeyOptions } from "../node-identity";
 import { stripImportedNodeControlFields } from "./imported-node-controls";
 import {
   getNodeOriginName,
@@ -82,6 +83,22 @@ export function detachSourceNodesFromState(
   return { nodes: nextNodes, renameMap: new Map<string, string>() };
 }
 
+// 依照连接信息的精确程度逐级放宽，同一级有歧义时交给下一层或原有名称回退。
+const ORIGIN_FINGERPRINT_SCOPES: readonly (NodeContentKeyOptions | undefined)[] = [
+  undefined,
+  { ignoreServer: true },
+  { ignoreServer: true, ignorePort: true },
+  { ignoreServer: true, ignorePort: true, ignoreSni: true, ignoreServername: true },
+];
+
+/**
+ * 合并来源刷新结果，按原名和后备匹配规则保留用户命名、删除记录与多来源归属。
+ * @param stateNodes 当前已保存的节点顺序和归属。
+ * @param parsedNodes 已应用当前来源命名模板的新节点。
+ * @param deletedNodeNames 旧格式中保存的删除标记。
+ * @param descriptor 来源标识、命名模板和匹配策略。
+ * @returns 合并后的节点和需要更新配置引用的改名映射。
+ */
 export function mergeParsedSourceNodes(
   stateNodes: ParsedNode[],
   parsedNodes: ParsedNode[],
@@ -123,17 +140,21 @@ export function mergeParsedSourceNodes(
   }
 
   const freshOriginCounts = new Map<string, number>();
-  for (const rawNode of parsedNodes) {
-    const node = normalizeNodeOriginName(rawNode);
-    const origin = originOf(node);
-    if (!origin) continue;
-    freshOriginCounts.set(origin, (freshOriginCounts.get(origin) ?? 0) + 1);
+  // 只需要为旧格式的名称删除标记区分重名节点；精确删除不使用这个计数。
+  if (deleted.size > 0) {
+    for (const rawNode of parsedNodes) {
+      const node = normalizeNodeOriginName(rawNode);
+      const origin = originOf(node);
+      if (!origin) continue;
+      freshOriginCounts.set(origin, (freshOriginCounts.get(origin) ?? 0) + 1);
+    }
   }
 
   const isDeleted = (node: ParsedNode, originNameRaw: string, displayNameRaw?: string): boolean => {
     const originName = (originNameRaw || "").trim();
     if (!originName) return false;
-    if (deletedNodeKeys.has(buildScopedNodeIdentityKey(originName, node))) return true;
+    if (deletedNodeKeys.size > 0 && deletedNodeKeys.has(buildScopedNodeIdentityKey(originName, node))) return true;
+    if (deleted.size === 0) return false;
 
     // Legacy deletedNodeNames are only origin/display-name markers. When a source
     // emits many distinct nodes with the same default origin name, a single
@@ -157,10 +178,7 @@ export function mergeParsedSourceNodes(
   const freshSeenKeys = new Set<string>();
   const freshOriginNames = new Set<string>();
   const freshByOrigin = new Map<string, ParsedNode[]>();
-  const freshKeyToOriginName = new Map<string, string | null>();
-  const freshKeyWithoutServerToOriginName = new Map<string, string | null>();
-  const freshKeyWithoutServerPortToOriginName = new Map<string, string | null>();
-  const freshKeyWithoutAddressToOriginName = new Map<string, string | null>();
+  const originByFingerprint = new Map<NodeContentKeyOptions | undefined, Map<string, string | null>>();
 
   for (const rawNode of parsedNodes) {
     const node = normalizeNodeOriginName(rawNode);
@@ -177,50 +195,25 @@ export function mergeParsedSourceNodes(
     const list = freshByOrigin.get(origin) ?? [];
     list.push(node);
     freshByOrigin.set(origin, list);
-    mergeUnique(freshKeyToOriginName, buildNodeContentKey(node), origin);
-    mergeUnique(freshKeyWithoutServerToOriginName, buildNodeContentKey(node, { ignoreServer: true }), origin);
-    mergeUnique(
-      freshKeyWithoutServerPortToOriginName,
-      buildNodeContentKey(node, { ignoreServer: true, ignorePort: true }),
-      origin
-    );
-    mergeUnique(
-      freshKeyWithoutAddressToOriginName,
-      buildNodeContentKey(node, {
-        ignoreServer: true,
-        ignorePort: true,
-        ignoreSni: true,
-        ignoreServername: true,
-      }),
-      origin
-    );
   }
-
-  const resolve = (value: string | null | undefined) =>
-    typeof value === "string" && value.trim() ? value.trim() : null;
 
   const inferMatchingOriginName = (node: ParsedNode): string | null => {
     if (!smartNodeMatchingEnabled) return null;
 
-    const inferred =
-      resolve(freshKeyToOriginName.get(buildNodeContentKey(node))) ??
-      resolve(freshKeyWithoutServerToOriginName.get(buildNodeContentKey(node, { ignoreServer: true }))) ??
-      resolve(
-        freshKeyWithoutServerPortToOriginName.get(
-          buildNodeContentKey(node, { ignoreServer: true, ignorePort: true })
-        )
-      ) ??
-      resolve(
-        freshKeyWithoutAddressToOriginName.get(
-          buildNodeContentKey(node, {
-            ignoreServer: true,
-            ignorePort: true,
-            ignoreSni: true,
-            ignoreServername: true,
-          })
-        )
-      );
-    return inferred && freshOriginNames.has(inferred) ? inferred : null;
+    // 原名仍在时无需模糊匹配。只有走到某一级后备规则时，才为整批新节点构建该级指纹。
+    for (const scope of ORIGIN_FINGERPRINT_SCOPES) {
+      let origins = originByFingerprint.get(scope);
+      if (!origins) {
+        origins = new Map();
+        for (const fresh of freshOrdered) {
+          mergeUnique(origins, buildNodeContentKey(fresh, scope), originOf(fresh));
+        }
+        originByFingerprint.set(scope, origins);
+      }
+      const inferred = origins.get(buildNodeContentKey(node, scope))?.trim();
+      if (inferred) return freshOriginNames.has(inferred) ? inferred : null;
+    }
+    return null;
   };
 
   const isUserRenamed = (nodeName: string, originName: string) => {
@@ -248,8 +241,8 @@ export function mergeParsedSourceNodes(
         ? String(record[ORIGIN_NAME_KEY]).trim()
         : "";
 
-    const inferred = inferMatchingOriginName(node);
     if (originRaw && freshOriginNames.has(originRaw)) return originRaw;
+    const inferred = inferMatchingOriginName(node);
     if (inferred) return inferred;
 
     const candidate = (node.name || "").trim();
@@ -299,7 +292,8 @@ export function mergeParsedSourceNodes(
     } as unknown as ParsedNode);
   };
 
-  const consumedFreshKeys = new Set<string>();
+  // 两个新节点索引都保留同一个已去重对象，消费标记不必重算内容指纹。
+  const consumedFresh = new Set<ParsedNode>();
   const originConsumed = new Map<string, number>();
   const takeFresh = (originName: string): ParsedNode | null => {
     const list = freshByOrigin.get(originName);
@@ -308,7 +302,7 @@ export function mergeParsedSourceNodes(
     if (idx >= list.length) return null;
     originConsumed.set(originName, idx + 1);
     const fresh = list[idx];
-    consumedFreshKeys.add(keyOf(fresh));
+    consumedFresh.add(fresh);
     return fresh;
   };
 
@@ -383,15 +377,19 @@ export function mergeParsedSourceNodes(
     pushPlanned(node, node.name, true);
   }
 
-  const baseKeyToIndex = new Map<string, number>();
-  baseNodes.forEach((node, idx) => baseKeyToIndex.set(keyOf(node), idx));
-
+  let baseKeyToIndex: Map<string, number> | undefined;
   const newNodes: ParsedNode[] = [];
   for (const node of freshOrdered) {
-    const key = keyOf(node);
-    if (consumedFreshKeys.has(key)) continue;
+    if (consumedFresh.has(node)) continue;
 
-    const existingIndex = smartNodeMatchingEnabled ? baseKeyToIndex.get(key) : undefined;
+    let existingIndex: number | undefined;
+    if (smartNodeMatchingEnabled) {
+      // 全部新节点都按原名匹配时，没有跨来源节点需要再做内容匹配。
+      if (!baseKeyToIndex) {
+        baseKeyToIndex = new Map(baseNodes.map((base, index) => [keyOf(base), index]));
+      }
+      existingIndex = baseKeyToIndex.get(keyOf(node));
+    }
     if (existingIndex !== undefined) {
       const existing = baseNodes[existingIndex];
       baseNodes[existingIndex] = mergeNodeWithFresh({

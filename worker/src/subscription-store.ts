@@ -5,7 +5,7 @@ import type { ParsedNode } from "@subboost/core/types/node";
 import { decryptEncryptedFieldV2, encryptEncryptedFieldV2 } from "@subboost/server-core/crypto";
 import {
   normalizeSubscriptionInfoForPersistence,
-  type PreparedRefreshCacheResult,
+  type PreparedRefreshCacheSnapshot,
   type SubscriptionAutoUpdateStateFields,
   type SubscriptionSummaryDataSource,
 } from "@subboost/server-core/subscription";
@@ -292,7 +292,7 @@ export async function commitSubscriptionRefresh(db: D1Database, input: {
   row: SubscriptionRow;
   key: string;
   now: number;
-  cache?: Extract<PreparedRefreshCacheResult, { ok: true }>;
+  cache?: Extract<PreparedRefreshCacheSnapshot, { ok: true }>;
   state?: SubscriptionAutoUpdateStateFields;
   autoUpdateInterval?: number | null;
   lease?: RefreshLease;

@@ -171,6 +171,27 @@ it("手动刷新发布新节点与流量数据，来源全失败时保留缓存"
   expect(await yaml.text()).toContain("fresh.example");
 });
 
+/** 生成前的配置校验仍在刷新提交前执行，失败不覆盖旧快照。 */
+it("手动刷新遇到无效的基础监听配置时保留旧快照", async () => {
+  await using fixture = await createWorkerFixture({ bindings: {
+    ENCRYPTION_KEY: "subscription-test",
+    fetch: async () => new Response("ss://YWVzLTEyOC1nY206cGFzcw@fresh.example:443#Fresh", {
+      headers: { "subscription-userinfo": "upload=3; download=4; total=20" },
+    }),
+  } });
+  const headers = await adminHeaders(fixture.request);
+  const { id } = await createSubscription(fixture.request, headers, {
+    urls: ["https://source.example/nodes"], config: { dnsYaml: "listeners: invalid" },
+    subscriptionInfo: { upload: 1, download: 2, total: 10 },
+  });
+  const path = `${root}/${id}`;
+  const refresh = await fixture.request(`${path}/refresh`, { method: "POST", headers });
+  expect(refresh.status).toBe(500);
+  expect(await (await fixture.request(path, { headers })).json()).toMatchObject({ subscription: {
+    nodes: [node], subscriptionInfo: { upload: 1, download: 2, total: 10 },
+  } });
+});
+
 /** 只替换拉取成功的来源，保留失败来源的已有节点。 */
 it("部分来源失败时仍刷新成功来源，并保留失败来源的已有节点", async () => {
   let resync = false;
