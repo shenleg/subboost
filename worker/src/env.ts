@@ -1,0 +1,43 @@
+// 定义 Worker 绑定及 HTTP/Cron 共用的运行时接缝。
+
+/** Cloudflare 注入 DB 和字符串配置；函数接缝只由直接调用入口的测试提供。 */
+export type WorkerBindings = {
+  DB: D1Database;
+  ENCRYPTION_KEY?: string;
+  JWT_SECRET?: string;
+  LOCAL_SETUP_TOKEN?: string;
+  APP_URL?: string;
+  CRON_SECRET?: string;
+  RELEASE_REPO?: string;
+  /** 可控时钟返回 Unix 毫秒。 */
+  now?: () => number;
+  /** 仅替代出站 HTTP，不影响 Hono 接收请求。 */
+  fetch?: typeof globalThis.fetch;
+};
+
+/** HTTP 路由共享的 Hono 环境类型。 */
+export type WorkerApp = { Bindings: WorkerBindings };
+
+/** 就绪检查、认证与初始化可共用的必填密钥配置指引。 */
+export const ENCRYPTION_KEY_MISSING = {
+  code: "ENCRYPTION_KEY_MISSING",
+  message: "请在 Cloudflare Dashboard 的 Workers 和 Pages 中选择此 Worker，打开「设置 → 变量和机密」，添加 ENCRYPTION_KEY。",
+} as const;
+
+/**
+ * 读取去掉首尾空白的加密密钥，与原版密钥读取方式一致。
+ * @param env 当前 Worker 绑定。
+ * @returns 配置的密钥；缺失或全空白时返回 `undefined`。
+ */
+export function getEncryptionKey(env: WorkerBindings): string | undefined {
+  return env.ENCRYPTION_KEY?.trim() || undefined;
+}
+
+/**
+ * 读取当前逻辑时间，供 HTTP 与 Cron 使用同一可控时钟。
+ * @param env Worker 绑定，可注入测试时钟。
+ * @returns Unix 毫秒。
+ */
+export function nowMs(env: WorkerBindings): number {
+  return env.now?.() ?? Date.now();
+}

@@ -8,10 +8,14 @@
   },
   "workspaces": [
     "packages/*",
-    "local"
+    "local",
+    "worker"
   ],
   "scripts": {
     "dev": "npm --workspace @subboost/local run dev",
+    "worker:dry-run": "wrangler deploy --dry-run",
+    "worker:test": "npm --workspace @subboost/worker run test",
+    "worker:typecheck": "npm --workspace @subboost/worker run typecheck",
     "build": "npm --workspace @subboost/local run build",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --config vitest.coverage.ts --coverage",
@@ -85,7 +89,9 @@
   },
   "allowScripts": {
     "@prisma/engines@7.10.1": true,
+    "esbuild@0.28.2": false,
     "prisma@7.10.1": true,
-    "unrs-resolver@1.12.2": true
+    "unrs-resolver@1.12.2": true,
+    "workerd@1.20261123.1": false
   }
 }
