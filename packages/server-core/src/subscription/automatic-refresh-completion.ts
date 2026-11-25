@@ -1,3 +1,4 @@
+// 将订阅刷新结果映射为自动刷新状态和 Cron 摘要。
 import type { AutomaticRefreshFailureAnalysis, SubscriptionAutoUpdateStateFields } from "./auto-update-state";
 import {
   buildAutomaticRefreshAutoUpdateState,
@@ -7,7 +8,7 @@ import {
   type AutomaticRefreshAutoUpdateStateResult,
 } from "./auto-update-state";
 import type { CronSubscriptionUpdateSummary, CronUpdateOutcome } from "./cron-update-summary";
-import type { PreparedRefreshCacheResult } from "./refresh-cache-result";
+import type { PreparedRefreshCacheSnapshot } from "./refresh-cache-result";
 
 export type AutomaticRefreshCompletionTarget = {
   id: string;
@@ -19,7 +20,7 @@ export type AutomaticRefreshCompletionTarget = {
 
 export type AutomaticRefreshCompletionPrepared = {
   requestedHosts: string[];
-  refreshResult: PreparedRefreshCacheResult;
+  refreshResult: PreparedRefreshCacheSnapshot;
   failureState: AutomaticRefreshFailureAnalysis["failureState"];
   failureReason: string;
 };
@@ -54,7 +55,7 @@ export type AutomaticRefreshCompletionDecision =
   | {
       kind: "success";
       nextAutoUpdateState: AutomaticRefreshAutoUpdateStateResult;
-      refreshResult: Extract<PreparedRefreshCacheResult, { ok: true }>;
+      refreshResult: Extract<PreparedRefreshCacheSnapshot, { ok: true }>;
       outcome: CronUpdateOutcome;
     };
 
@@ -103,6 +104,12 @@ export function formatAutomaticRefreshResultError(
   return `Subscription ${target.id} (${target.username || "-"}): ${message}`;
 }
 
+/**
+ * 将准备好的刷新快照转换为 Cron 完成决策，不读取 YAML。
+ * @param params 刷新快照、订阅状态、尝试时间与节点配额，可覆盖状态计算器。
+ * @returns Cron 结果摘要及该结果对应的持久化数据。
+ * @throws 收到未支持的失败原因时抛出异常。
+ */
 export function resolveAutomaticRefreshCompletionDecision(params: {
   target: AutomaticRefreshCompletionTarget;
   currentAutoUpdateState: SubscriptionAutoUpdateStateFields;

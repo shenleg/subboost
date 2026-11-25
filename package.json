@@ -8,11 +8,18 @@
   },
   "workspaces": [
     "packages/*",
-    "local"
+    "local",
+    "worker"
   ],
   "scripts": {
     "dev": "npm --workspace @subboost/local run dev",
-    "build": "npm --workspace @subboost/local run build",
+    "build": "npm --workspace @subboost/worker run build",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "worker:dev": "npm run build && wrangler d1 migrations apply DB --local && wrangler dev",
+    "worker:dry-run": "node worker/scripts/check-bundle.mjs",
+    "worker:test": "npm --workspace @subboost/worker run test",
+    "worker:typecheck": "npm --workspace @subboost/worker run typecheck",
+    "check:worker": "npm run worker:typecheck && npm run worker:test && npm run build && npm --workspace @subboost/worker run test:spa:built && npm run worker:dry-run && npm run local:db:generate && vitest run --config vitest.coverage.ts",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --config vitest.coverage.ts --coverage",
     "test:core": "vitest run --config vitest.core.config.ts",
@@ -23,6 +30,13 @@
     "local:lint": "npm --prefix local run lint",
     "local:typecheck": "npm --prefix local run typecheck",
     "local:build": "npm --prefix local run build"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ENCRYPTION_KEY": {
+        "description": "唯一必填密钥。用 openssl rand -hex 32 生成随机值，部署后请妥善保管，不要提交到 Git。"
+      }
+    }
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",
@@ -85,7 +99,9 @@
   },
   "allowScripts": {
     "@prisma/engines@7.10.1": true,
+    "esbuild@0.28.2": false,
     "prisma@7.10.1": true,
-    "unrs-resolver@1.12.2": true
+    "unrs-resolver@1.12.2": true,
+    "workerd@1.20261123.1": false
   }
 }

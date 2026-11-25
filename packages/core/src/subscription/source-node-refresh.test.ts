@@ -87,6 +87,22 @@ describe("source node refresh helpers", () => {
     });
   });
 
+  /** 正文重读时，已有来源原名优先于其他节点恰好相同的连接指纹。 */
+  it("保留精确原名对应的手动名称，即使另一节点匹配旧连接指纹", () => {
+    const stored = ssNode("我的名称", {
+      [ORIGIN_NAME_KEY]: "Original", [SOURCE_IDS_KEY]: ["source-a"], server: "old.example.com",
+    });
+    const refreshed = mergeParsedSourceNodes([stored], [
+      ssNode("Original", { server: "new.example.com" }),
+      ssNode("Another", { server: "old.example.com" }),
+    ], [], { sourceId: "source-a", smartNodeMatchingEnabled: true });
+
+    expect(refreshed.nodes.map(({ name, server }) => ({ name, server }))).toEqual([
+      { name: "我的名称", server: "new.example.com" },
+      { name: "Another", server: "old.example.com" },
+    ]);
+  });
+
   it("merges refreshed source nodes while preserving manual renames and deleted nodes", () => {
     const stateNodes = [
       ssNode("[Old]Alpha", {

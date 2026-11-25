@@ -42,4 +42,8 @@ The app has a dark and a light theme with the same layout. Take colors from the 
 
 - Keep README changes bilingual: update `README-CN.md` first, then sync `README.md`.
 - Keep deployment instructions in the documentation site unless the README only needs a short pointer.
-- Avoid publishing maintainer-only workflow, private infrastructure details, or machine-specific paths.
+- Document repository-wide rules for contributors and automated checks. Keep private infrastructure details, account-specific steps, and machine-specific paths out of public docs.
+
+## Worker and upstream sync
+
+For Worker changes and upstream sync contributions, follow the [upstream sync guide](upstream-sync-guide.md) for repository boundaries, conflict rules, and the common verification gate. Automated checks can use the linked machine-readable zones and parity map to match paths and contracts.
