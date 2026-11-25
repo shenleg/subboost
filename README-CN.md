@@ -15,7 +15,7 @@
 
 > **部署到 Cloudflare Workers 免费版** — 无需服务器，使用一套 D1 数据库，只需配置 `ENCRYPTION_KEY`。[部署指南](docs/cloudflare-workers.md)
 >
-> [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shenleg/subboost)
+> [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shenleg/subboost) [![导入已有仓库](https://img.shields.io/badge/%E5%AF%BC%E5%85%A5%E5%B7%B2%E6%9C%89%E4%BB%93%E5%BA%93-475569?style=for-the-badge&logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/?to=/:account/workers-and-pages)
 
 **SubBoost** 是一个 **Clash/Mihomo 订阅转换、增强和管理** 工具。可以将机场订阅和自建节点转换为优化后的聚合订阅，并自动更新。通过 UI 可视化，一键实现 **链式代理、精确分流、防 DNS 泄露和多订阅聚合** 等高级功能。
 
