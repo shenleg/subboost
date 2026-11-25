@@ -43,15 +43,17 @@ npm run build
 npm run deploy -- --secrets-file .env.worker-production
 ```
 
-后续升级保留原 D1 ID 和线上密钥，运行 `npm run build && npm run deploy`。不要直接运行 `wrangler deploy` 来升级，否则不会先应用 SQL。不要用 `npm run deploy -- --dry-run`，因为它仍会先跑远端迁移；只想本地验证时执行 `npm run check:worker`，或构建后单独执行 `npm run worker:dry-run`。
+后续升级保留原 D1 ID 和线上密钥，运行 `npm run build && npm run deploy`。不要直接运行 `wrangler deploy` 来升级，否则不会先应用 SQL。不要用 `npm run deploy -- --dry-run`，因为它仍会先跑远端迁移；只想本地验证时执行 `npm run check:worker`（首次运行前用 `npx playwright install chromium` 安装浏览器），或构建后单独执行 `npm run worker:dry-run`。
 
 ## 域名、调度与排障
 
 - **自定义域名**：在 Worker 的 **Settings → Domains & Routes** 添加域名。默认从请求 URL 推导站点地址、Cookie 安全属性和订阅公开链接，一般不用配置 `APP_URL`。只有需要固定规范域名时才显式设置合法的 HTTPS `APP_URL`。
-- **探活与就绪**：`GET /api/health/live` 只检查 Worker 存活；`GET /api/health/ready` 还检查密钥和 D1 初始化表。返回 `ENCRYPTION_KEY_MISSING` 时，到 **Workers & Pages → 该 Worker → Settings → Variables and Secrets** 添加 `ENCRYPTION_KEY`，选择 **Secret** 并使变更生效；不要随意更换已有数据的加密密钥。若返回 `database: "unavailable"`，核对 `DB` 的 ID 与迁移结果；升级时也应确认 `0002_subscription_cron.sql` 已应用。
+- **探活与就绪**：`GET /api/health/live` 只检查 Worker 存活；`GET /api/health/ready` 还检查密钥和当前完整迁移的 D1 表。返回 `ENCRYPTION_KEY_MISSING` 时，到 **Workers & Pages → 该 Worker → Settings → Variables and Secrets** 添加 `ENCRYPTION_KEY`，选择 **Secret** 并使变更生效；不要随意更换已有数据的加密密钥。若返回 `database: "unavailable"`，核对 `DB` 的 ID 与迁移结果；升级时确认包括 `0002_subscription_cron.sql` 和 `0003_manual_refresh.sql` 在内的迁移均已应用。
 - **自动刷新**：订阅每 6 分钟检查一轮，规则索引每 6 小时刷新。`CRON_BATCH_SIZE` 默认 3（可设 1–5，超过 5 按 5）；`CRON_FETCH_LIMIT` 默认 50（有效范围 20–50，超过 50 按 50，小于 20 或无效值回退默认）。重试和重定向逐次计入外部请求预算。原生 Cron 不需要 `CRON_SECRET`；若要手动调用 HTTP Cron，才添加该 Secret 并使用 `Authorization: Bearer …`，未配置时 HTTP Cron 拒绝调用。
 - **订阅源**：Worker 在 Cloudflare 边缘运行，不能访问你的局域网；打开账户里的订阅源安全开关也不会开放这一能力。
 - **其他变量**：`JWT_SECRET` 可覆盖从 `ENCRYPTION_KEY` 派生的会话签名密钥；`RELEASE_REPO` 可覆盖默认的 `SubBoost/subboost` 版本检查目标。全部部署差异见 [Parity Map](worker-parity.json)。
+- **手动刷新**：仪表盘一次点击自动续跑超出单次出站预算的订阅；成功前不会发布部分快照。直接调用 HTTP 的客户端收到 `202 SUBSCRIPTION_REFRESH_PENDING` 时，用响应里的 `continuation` 作为 `X-SubBoost-Refresh-Continuation` 请求头再次 POST 同一地址。令牌限当前订阅版本和阶段，有效期 10 分钟；令牌丢失时，不带该请求头重新 POST 可接续仍有效的当前版本。
+- **模板上传**：请求最多 4 MiB；保存时配置须加密为约两倍 UTF-8 字节数的 v2 密文，加上元数据后受 D1 单行 2,000,000 字节限制。若收到 `413 PAYLOAD_TOO_LARGE`，请缩小模板配置；可保存的配置通常不到 1 MB。
 
 ## 免费版预算与验证边界
 

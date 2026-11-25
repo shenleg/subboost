@@ -1,6 +1,34 @@
 // 通过 Worker 顶层入口和真实 D1 验证 Cron 调度与 HTTP 契约。
+import { fileURLToPath, URL as NodeURL } from "node:url";
+import { unstable_readConfig } from "wrangler";
+import parity from "../../docs/worker-parity.json";
 import { expect, it } from "vitest";
 import { createWorkerFixture } from "./fixture";
+
+const wranglerConfig = fileURLToPath(new NodeURL("../../wrangler.jsonc", import.meta.url));
+const subscriptionCron = "/api/cron/update-subscriptions";
+const ruleIndexCron = "/api/cron/update-rule-index";
+
+/** 验证部署配置和机器人清单声明完全相同的原生触发器。 */
+it("Wrangler Cron 触发器与机器可读 parity 一致", () => {
+  const { triggers } = unstable_readConfig({ config: wranglerConfig });
+  expect([...(triggers.crons ?? [])].sort()).toEqual(parity.schedules.map(({ cron }) => cron).sort());
+  expect(parity.schedules.map(({ localTrigger }) => localTrigger).sort()).toEqual([
+    `POST ${ruleIndexCron}`, `POST ${subscriptionCron}`,
+  ]);
+});
+
+/**
+ * 从公开 parity 清单选择入口表达式，让原生任务契约测试覆盖实际部署映射。
+ * @param route 该原生任务对应的 HTTP 路径。
+ * @returns 该任务在清单中声明的原生表达式。
+ * @throws 清单未映射此路径时抛出。
+ */
+function configuredSchedule(route: string) {
+  const schedule = parity.schedules.find(({ localTrigger }) => localTrigger === `POST ${route}`);
+  if (!schedule) throw new Error(`Cron parity 缺少 ${route}`);
+  return schedule.cron;
+}
 
 /** 未配置的 Cron 不需要访问数据库或外部服务。 */
 it("忽略未配置的原生 Cron 表达式", async () => {
@@ -18,11 +46,11 @@ it("定时更新规则索引，不依赖 CRON_SECRET；HTTP 则要求正确的 B
     return Response.json({ tree: url.includes("?recursive=1")
       ? [{ type: "blob", path: "geosite/cron-test.mrs" }] : [] });
   } } });
-  const path = "/api/cron/update-rule-index";
+  const path = ruleIndexCron;
   const init = { method: "POST", headers: { Authorization: "Bearer cron-test-secret" } };
 
   expect((await fixture.request(path, init)).status).toBe(503);
-  await fixture.scheduled("0 */6 * * *");
+  await fixture.scheduled(configuredSchedule(ruleIndexCron));
   expect(calls.length).toBeGreaterThan(0);
   const initialCalls = calls.length;
   fixture.env.CRON_SECRET = "cron-test-secret";
@@ -35,11 +63,10 @@ it("定时更新规则索引，不依赖 CRON_SECRET；HTTP 则要求正确的 B
   expect(forced.status).toBe(200);
   expect(await forced.json()).toMatchObject({ success: true, status: "refreshed" });
   expect(calls).toHaveLength(initialCalls * 2);
-  await fixture.scheduled("0 */6 * * *");
+  await fixture.scheduled(configuredSchedule(ruleIndexCron));
   expect(calls).toHaveLength(initialCalls * 3);
 });
 
-const subscriptionCron = "/api/cron/update-subscriptions";
 const cronInit = { method: "POST", headers: { Authorization: "Bearer cron-test-secret" } };
 const sourceNode = "ss://YWVzLTEyOC1nY206cGFzcw@new.example:443#New";
 const savedNode = { name: "Old", type: "ss", server: "old.example", port: 443, cipher: "aes-128-gcm", password: "pass" };
@@ -47,7 +74,12 @@ const epoch = Date.UTC(2026, 0, 1);
 const tick = 360_000;
 type Fixture = Awaited<ReturnType<typeof createWorkerFixture>>;
 
-/** 通过 HTTP 初始化管理员并返回认证请求头；初始化失败时断言报错。 */
+/**
+ * 通过 HTTP 初始化管理员。
+ * @param fixture 当前测试使用的空 Worker 环境。
+ * @returns 后续请求需要的会话和 JSON 请求头。
+ * @throws 初始化未成功时断言报错。
+ */
 async function initialize(fixture: Fixture) {
   const res = await fixture.request("/api/setup/admin", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: "admin", password: "cron-test-password", passwordConfirm: "cron-test-password" }) });
@@ -55,7 +87,16 @@ async function initialize(fixture: Fixture) {
   return { Cookie: res.headers.get("Set-Cookie")!.split(";")[0], "Content-Type": "application/json" };
 }
 
-/** 保存用于自动刷新的订阅并返回管理路径；无法创建时断言报错。 */
+/**
+ * 保存用于自动刷新的订阅。
+ * @param fixture 当前 Worker 环境。
+ * @param headers 管理员会话和 JSON 请求头。
+ * @param name 便于区分的订阅名。
+ * @param urls 保存的外部订阅源。
+ * @param extra 覆盖默认请求字段的场景配置。
+ * @returns 订阅管理路径。
+ * @throws 创建失败时断言报错。
+ */
 async function create(fixture: Fixture, headers: HeadersInit, name: string, urls: string[], extra = {}) {
   const response = await fixture.request("/api/subscriptions", { method: "POST", headers,
     body: JSON.stringify({ name, nodes: [savedNode], urls, autoUpdateInterval: 360, ...extra }) });
@@ -64,7 +105,14 @@ async function create(fixture: Fixture, headers: HeadersInit, name: string, urls
   return `/api/subscriptions/${subscription.id}`;
 }
 
-/** 读取管理员可见的订阅状态；请求失败时断言报错。 */
+/**
+ * 读取管理员可见的订阅状态。
+ * @param fixture 当前 Worker 环境。
+ * @param headers 管理员会话请求头。
+ * @param path 被查询的订阅管理路径。
+ * @returns 订阅详情，包括公开可观察的刷新状态。
+ * @throws 查询失败时断言报错。
+ */
 async function read(fixture: Fixture, headers: HeadersInit, path: string) {
   const response = await fixture.request(path, { headers });
   expect(response.status).toBe(200);
@@ -90,7 +138,7 @@ it("按最久未更新处理三条到期订阅，下一轮优先接力后排", a
     now++;
   }
   now += tick;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect([...calls]).toEqual(["/old0", "/old1", "/old2"]);
   expect(await read(fixture, headers, paths[1])).toMatchObject({ lastUpdatedAt: new Date(now).toISOString(),
     nodes: expect.arrayContaining([expect.objectContaining({ name: "New" })]) });
@@ -127,7 +175,7 @@ it("按实际重定向与 UA 计量，跨轮重放已完成回调且不把延后
   const big = await create(fixture, headers, "多源订阅", Array.from({ length: 5 }, (_, i) => `https://source.example/big${i}`));
   for (const tickNumber of [1, 2]) {
     now = epoch + tickNumber * tick;
-    await fixture.scheduled("*/6 * * * *");
+    await fixture.scheduled(configuredSchedule(subscriptionCron));
   }
   calls.length = 0;
   redirect = true;
@@ -145,12 +193,12 @@ it("按实际重定向与 UA 计量，跨轮重放已完成回调且不把延后
   expect(await read(fixture, headers, big)).toEqual(unchanged);
 
   calls.length = 0;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(new Set(calls)).toEqual(new Set(["/small"]));
   expect(await read(fixture, headers, small)).toMatchObject({ lastUpdatedAt: new Date(now).toISOString() });
 
   calls.length = 0;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(calls).toHaveLength(32);
   expect(new Set(calls.map((url) => url.split("?")[0]))).toEqual(new Set(["/big3", "/big4"]));
   expect(await read(fixture, headers, big)).toMatchObject({ lastUpdatedAt: new Date(now).toISOString(),
@@ -188,7 +236,7 @@ it("并发重入时跳过，过期易主后旧调用返回 JOB_LEASE_LOST", asyn
       await newProceed.promise;
       return new Response(sourceNode);
     };
-    newRun = fixture.scheduled("*/6 * * * *");
+    newRun = fixture.scheduled(configuredSchedule(subscriptionCron));
     await newEntered.promise;
     oldProceed.resolve();
     const lost = await old;
@@ -244,7 +292,7 @@ it("订阅 Cron 限量清理过期吊销会话和认证限流记录", async () =
   await db.batch(Array.from({ length: 41 }, (_, i) => db.prepare(`INSERT INTO AuthRateLimit
     (scope, ipHash, count, resetAt) VALUES ('cleanup', ?, 1, ?)`).bind(String(i), i === 40 ? epoch + 1 : epoch)));
   for (const expected of [21, 1]) {
-    await fixture.scheduled("*/6 * * * *");
+    await fixture.scheduled(configuredSchedule(subscriptionCron));
     expect(await db.prepare("SELECT COUNT(*) AS n FROM RevokedSession").first("n")).toBe(expected);
     expect(await db.prepare("SELECT COUNT(*) AS n FROM AuthRateLimit").first("n")).toBe(expected);
   }
@@ -271,7 +319,7 @@ it("部分来源成功时仍发布新缓存；同一来源第三次稳定失败�
   const headers = await initialize(fixture);
   const path = await create(fixture, headers, "部分失败", ["https://source.example/good", "https://source.example/gone"]);
   now += tick;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   gone = true;
   for (const count of [1, 2, 3]) {
     now += tick;
@@ -285,7 +333,7 @@ it("部分来源成功时仍发布新缓存；同一来源第三次稳定失败�
   }
   now += tick;
   const prior = calls;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(calls).toBe(prior);
 });
 
@@ -344,10 +392,10 @@ it("尊重批次和 fetch 限制，并以 20 次预算完成流量补取及后�
   expect(await read(fixture, headers, first)).toMatchObject({ lastUpdatedAt: null, autoUpdateState: { lastAttemptedAt: null } });
 
   calls.length = 0;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(await read(fixture, headers, second)).toMatchObject({ lastUpdatedAt: new Date(now).toISOString() });
   expect(calls).toHaveLength(0);
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(calls).toEqual(Array(4).fill("HEAD /info"));
   expect(await read(fixture, headers, first)).toMatchObject({ lastUpdatedAt: new Date(now).toISOString(), subscriptionInfo: { total: expect.any(Number) } });
 });
@@ -402,7 +450,7 @@ it("D1 存储容量不足不覆盖缓存、不停用，编辑后无需等待冷�
   const headers = await initialize(fixture);
   const path = await create(fixture, headers, "状态隔离", ["https://source.example/storage"], { config: { notes: "x".repeat(260_000) } });
   now += tick;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   const before = await read(fixture, headers, path);
   expect(before).toMatchObject({ lastUpdatedAt: null, autoUpdateInterval: 360, autoUpdateState: { externalFailureCount: 1 } });
   oversized = true;
@@ -411,10 +459,10 @@ it("D1 存储容量不足不覆盖缓存、不停用，编辑后无需等待冷�
   expect(await read(fixture, headers, path)).toEqual(before);
   const spent = calls;
   now += tick;
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(calls).toBe(spent);
   expect((await fixture.request(path, { method: "PUT", headers, body: JSON.stringify({ config: {} }) })).status).toBe(200);
-  await fixture.scheduled("*/6 * * * *");
+  await fixture.scheduled(configuredSchedule(subscriptionCron));
   expect(calls).toBeGreaterThan(spent);
   expect(await read(fixture, headers, path)).toMatchObject({ lastUpdatedAt: new Date(now).toISOString(),
     autoUpdateInterval: 360, autoUpdateState: { externalFailureCount: 0 } });

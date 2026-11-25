@@ -229,6 +229,30 @@ test("通过当前访问域名下载订阅配置", async () => {
   });
 });
 
+/** Worker 适配器紧接 pending 继续请求，同一次点击只在终态报告成功。 */
+test("一次点击完成需要接续的订阅刷新", async () => {
+  const requests = [];
+  await withPage({
+    "GET /api/auth/me": adminAuth,
+    "GET /api/subscriptions": { subscriptions: [{
+      id: "s1", name: "测试订阅", token: "token", subscriptionUrl: `${origin}/api/subscriptions/token/config.yaml`,
+      createdAt: "2025-01-01T00:00:00Z", autoUpdateState: { disabledAt: null, nodeQuotaFailureCount: 0 },
+    }] },
+    "POST /api/subscriptions/s1/refresh": (route) => {
+      requests.push(route.request().headers()["x-subboost-refresh-continuation"]);
+      return requests.length === 1
+        ? route.fulfill({ status: 202, json: { code: "SUBSCRIPTION_REFRESH_PENDING", continuation: "fixture-next" } })
+        : route.fulfill({ json: { success: true, refreshableSourceCount: 18, refreshedSourceCount: 18,
+          nodeCount: 20, attemptedUrlFetch: true } });
+    },
+  }, async (page) => {
+    await page.goto(`${origin}/dashboard`);
+    await page.getByTitle("重新生成配置并刷新缓存").click();
+    await page.getByText("刷新完成：18 个源已更新，共 20 个节点").waitFor();
+    assert.deepEqual(requests, [undefined, "fixture-next"]);
+  });
+});
+
 /** 模板深链接通过查询参数打开上传界面，并以 replace 消费参数。 */
 test("模板上传深链接消费查询参数，不重新加载页面", async () => {
   await withPage({ "GET /api/auth/me": adminAuth }, async (page) => {

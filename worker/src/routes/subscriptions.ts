@@ -1,8 +1,9 @@
 // 组装订阅管理、公开 YAML、订阅源导入及安全设置端点。
+import { decryptEncryptedFieldV2, encryptEncryptedFieldV2 } from "@subboost/server-core/crypto";
 import { readJsonBody } from "@subboost/server-core/http";
 import { buildSourceImportParseResult } from "@subboost/server-core/subscription/source-import";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { createExternalTransport, ExternalFetchBudgetExceededError } from "../transport";
+import { createExternalFetchBudget, createExternalTransport, ExternalFetchBudgetExceededError } from "../transport";
 import { Hono, type Context } from "hono";
 import { generateClashYaml } from "@subboost/core/generator";
 import { buildGenerateOptionsFromConfig, getEffectiveTestOptions } from "@subboost/core/subscription/config-utils";
@@ -15,7 +16,14 @@ import {
   serializeSubscriptionDetailData, serializeSubscriptionSummaryData, validateSubscriptionNodeList,
 } from "@subboost/server-core/subscription";
 import { ENCRYPTION_KEY_MISSING, getClientIp, getEncryptionKey, getSiteOrigin, nowMs, type WorkerApp } from "../env";
-import { buildSubscriptionFetchCallbacks, MAX_NODES_PER_SUBSCRIPTION, prepareSubscriptionRefresh } from "../subscription-refresh";
+import {
+  acquireSubscriptionRefreshLease, clearManualRefreshCheckpoint, readRefreshCheckpoint,
+  SubscriptionCronLeaseLostError, writeRefreshCheckpoint,
+} from "../subscription-cron-store";
+import {
+  buildSubscriptionFetchCallbacks, MAX_NODES_PER_SUBSCRIPTION, prepareSubscriptionRefresh,
+  replaySubscriptionRefreshCallbacks, type RefreshCheckpoint,
+} from "../subscription-refresh";
 import {
   commitSubscriptionRefresh, insertSubscription, listSubscriptions, readPublicSubscription, readSubscription,
   readSubscriptionSecrets, removeSubscription, rotateSubscriptionToken, saveSubscriptionEdit,
@@ -140,6 +148,69 @@ function serialize(c: RouteContext, row: SubscriptionRow, key: string, detail = 
   return detail ? serializeSubscriptionDetailData(row, secrets, options) : serializeSubscriptionSummaryData(row, secrets, options);
 }
 
+type ManualCheckpoint = { continuation: string; checkpoint: RefreshCheckpoint };
+
+async function refreshSubscription(c: RouteContext, ownerId: string, id: string) {
+  const env = c.env;
+  const key = getEncryptionKey(env)!;
+  const requested = c.req.header("X-SubBoost-Refresh-Continuation");
+  const conflict = () => c.json({ error: "Subscription changed while refresh was in progress.", code: "SUBSCRIPTION_CHANGED" }, 409);
+  // 先验证所有权，避免让不存在的订阅产生租约；获锁后再读取当前版本。
+  const exists = await env.DB.prepare("SELECT 1 FROM Subscription WHERE id = ? AND ownerId = ?").bind(id, ownerId).first();
+  if (!exists) return c.json(notFound, 404);
+  const lease = await acquireSubscriptionRefreshLease(env, `manual-subscription-refresh:${id}`);
+  if (!lease) return c.json({ error: "此订阅正在刷新，请稍后重试。", code: "SUBSCRIPTION_REFRESH_IN_PROGRESS" }, 409);
+  try {
+    const row = await readSubscription(env.DB, ownerId, id);
+    if (!row) return c.json(notFound, 404);
+    const ciphertext = await readRefreshCheckpoint(env, row, "manual");
+    const saved: ManualCheckpoint | null = ciphertext ? JSON.parse(decryptEncryptedFieldV2(ciphertext, key)) : null;
+    if (requested !== undefined && (!saved || requested !== saved.continuation)) return conflict();
+    // 无令牌的新请求也可接续当前版本，避免上个响应丢失就从头抓取。
+    const checkpoint = saved?.checkpoint ?? { nodes: [], userInfo: [] };
+    const budget = createExternalFetchBudget();
+    const live = buildSubscriptionFetchCallbacks(createExternalTransport(env, { budget }));
+    const replay = replaySubscriptionRefreshCallbacks(checkpoint, live, budget, lease.maintain);
+    let prepared: Awaited<ReturnType<typeof prepareSubscriptionRefresh>>;
+    try {
+      prepared = await prepareSubscriptionRefresh(readSubscriptionSecrets(row, key), replay.callbacks);
+    } catch (error) {
+      if (!(error instanceof ExternalFetchBudgetExceededError)) throw error;
+      if (!replay.progressed()) return c.json({ error: error.message, code: "EXTERNAL_FETCH_BUDGET_EXCEEDED" }, 503);
+      // 每一段使用新的令牌，旧请求只能在返回冲突后重新开始，不能接管后续阶段。
+      const continuation = crypto.randomUUID();
+      const next = { continuation, checkpoint: replay.checkpoint() } satisfies ManualCheckpoint;
+      const outcome = await writeRefreshCheckpoint(env, lease, row, encryptEncryptedFieldV2(JSON.stringify(next), key), "manual");
+      if (outcome === "stale") return conflict();
+      if (outcome === "storage_limit") {
+        await clearManualRefreshCheckpoint(env, lease, row);
+        return storageLimit(c);
+      }
+      c.header("Cache-Control", "no-store");
+      return c.json({ code: "SUBSCRIPTION_REFRESH_PENDING", continuation }, 202);
+    }
+    const { snapshot, refreshResult } = prepared;
+    if (saved) await clearManualRefreshCheckpoint(env, lease, row);
+    if (!refreshResult.ok) {
+      const failure = buildManualRefreshFailureResponse({ refreshResult, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
+      return c.json(failure.body, failure.status);
+    }
+    await lease.maintain();
+    const now = nowMs(env);
+    const result = await commitSubscriptionRefresh(env.DB, { row, key, now, lease, cache: refreshResult,
+      state: createResetSubscriptionAutoUpdateState() });
+    if (result === "storage_limit") return storageLimit(c);
+    if (result === "stale") return conflict();
+    return c.json(buildManualRefreshSuccessResponseBody({ subscriptionId: row.id, refreshResult, snapshot, cachedAt: new Date(now) }));
+  } catch (error) {
+    if (error instanceof SubscriptionCronLeaseLostError) return conflict();
+    throw error;
+  } finally {
+    // 释放失败由 TTL 接管，旧请求不能释放新的持有者。
+    await lease.release().catch(() => undefined);
+  }
+}
+
 function changed(c: RouteContext) {
   return c.json({ error: "Subscription changed while the operation was in progress.", code: "SUBSCRIPTION_CHANGED" }, 409);
 }
@@ -237,30 +308,7 @@ export const subscriptionRoutes = new Hono<WorkerApp>()
     const row = await readSubscription(c.env.DB, admin.id, c.req.param("id"));
     return row ? saveFromRequest(c, admin.id, row) : c.json(notFound, 404);
   }))
-  .post("/subscriptions/:id/refresh", (c) => withCurrentAdmin(c, async (admin) => {
-    const row = await readSubscription(c.env.DB, admin.id, c.req.param("id"));
-    if (!row) return c.json(notFound, 404);
-    const key = getEncryptionKey(c.env)!;
-    try {
-      const callbacks = buildSubscriptionFetchCallbacks(createExternalTransport(c.env));
-      const { snapshot, refreshResult } = await prepareSubscriptionRefresh(readSubscriptionSecrets(row, key), callbacks);
-      if (!refreshResult.ok) {
-        const failure = buildManualRefreshFailureResponse({ refreshResult, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
-        return c.json(failure.body, failure.status);
-      }
-      const now = nowMs(c.env);
-      const result = await commitSubscriptionRefresh(c.env.DB, { row, key, now, cache: refreshResult,
-        state: createResetSubscriptionAutoUpdateState() });
-      if (result === "storage_limit") return storageLimit(c);
-      if (result === "stale") {
-        return c.json({ error: "Subscription changed while refresh was in progress.", code: "SUBSCRIPTION_CHANGED" }, 409);
-      }
-      return c.json(buildManualRefreshSuccessResponseBody({ subscriptionId: row.id, refreshResult, snapshot, cachedAt: new Date(now) }));
-    } catch (error) {
-      if (!(error instanceof ExternalFetchBudgetExceededError)) throw error;
-      return c.json({ error: error.message, code: "EXTERNAL_FETCH_BUDGET_EXCEEDED" }, 503);
-    }
-  }))
+  .post("/subscriptions/:id/refresh", (c) => withCurrentAdmin(c, (admin) => refreshSubscription(c, admin.id, c.req.param("id"))))
   .post("/subscriptions/:id/reset-link", (c) => withCurrentAdmin(c, async (admin) => {
     const id = c.req.param("id");
     // If-Match 只接受一个带引号的旧令牌，不接受通配符或弱 ETag。

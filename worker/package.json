@@ -5,7 +5,8 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "build": "vite build",
-    "test:spa": "npm run build && node --test test/spa.smoke.mjs",
+    "test:spa": "npm run build && npm run test:spa:built",
+    "test:spa:built": "node --test test/spa.smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json"
   },

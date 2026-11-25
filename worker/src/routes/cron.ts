@@ -57,8 +57,8 @@ function runRuleIndex(env: WorkerBindings, force = false) {
  * @param controller Cloudflare 告知的触发表达式。
  * @param env 本次运行的 D1 与传输绑定。
  * @param ctx 用于等待任务完成的执行上下文。
- * @returns 未知表达式不执行任何任务。
- * @throws 已知任务执行失败时由 `waitUntil` 向平台报告。
+ * @returns 无返回值；已知表达式向 `waitUntil` 注册任务，未知表达式直接结束。
+ * @throws 不主动同步抛异常；任务失败会拒绝传入 `waitUntil` 的 Promise。
  */
 export const runScheduled: ExportedHandlerScheduledHandler<WorkerBindings> = (controller, env, ctx) => {
   // 规则缓存有效期长于 Cron 周期，定时触发需主动更新，HTTP 默认仍尊重缓存。

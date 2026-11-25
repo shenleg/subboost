@@ -26,7 +26,7 @@
   },
   "validation": {
     "install": "npm ci",
-    "required": ["npm run check:worker", "npm --workspace @subboost/worker run test:spa"],
+    "required": ["npm run check:worker"],
     "bundle": { "metric": "wrangler_total_upload_gzip_bytes", "exclusiveMax": 3000000 },
     "cloudflareWritesAllowed": false
   }

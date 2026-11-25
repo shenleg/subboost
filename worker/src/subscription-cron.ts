@@ -6,15 +6,15 @@ import {
   resolveAutomaticRefreshUnexpectedFailureCompletion, resolveAutoUpdateScheduleState, resolveSubscriptionAutoUpdateState,
   type CronUpdateOutcome,
 } from "@subboost/server-core/subscription";
-import { SUBSCRIPTION_MAX_PROFILE_REQUESTS } from "@subboost/server-core/subscription/snapshot-comparison";
 import { nowMs, type WorkerBindings } from "./env";
 import {
-  acquireSubscriptionCronLease, cleanExpiredCronRecords, readCronBatch, readCronCheckpoint, SubscriptionCronLeaseLostError,
-  writeCronCheckpoint, writeCronSweep, type SubscriptionCronLease,
+  acquireSubscriptionRefreshLease, cleanExpiredCronRecords, readCronBatch, readRefreshCheckpoint, SubscriptionCronLeaseLostError,
+  writeRefreshCheckpoint, writeCronSweep, type SubscriptionRefreshLease,
 } from "./subscription-cron-store";
-import { buildSubscriptionFetchCallbacks, MAX_NODES_PER_SUBSCRIPTION, prepareSubscriptionRefresh } from "./subscription-refresh";
+import { buildSubscriptionFetchCallbacks, MAX_NODES_PER_SUBSCRIPTION, prepareSubscriptionRefresh, replaySubscriptionRefreshCallbacks,
+  type RefreshCheckpoint } from "./subscription-refresh";
 import { commitSubscriptionRefresh, readSubscription, readSubscriptionSecrets, type SubscriptionRow } from "./subscription-store";
-import { createExternalTransport, ExternalFetchBudgetExceededError, MAX_FETCHES_PER_REQUEST, type ExternalFetchBudget } from "./transport";
+import { createExternalTransport, ExternalFetchBudgetExceededError, type ExternalFetchBudget } from "./transport";
 
 const DEFAULT_BATCH_SIZE = 3;
 // 每条订阅需要候选复读、检查点查询和最多两条提交语句；为租约、进度和清理留足 D1 查询额度。
@@ -25,64 +25,21 @@ function batchSize(value: string | undefined) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, MAX_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
 }
 
-type Callbacks = ReturnType<typeof buildSubscriptionFetchCallbacks>;
-type NodeResult = Awaited<ReturnType<Callbacks["fetchUrlNodes"]>>;
-type InfoResult = Awaited<ReturnType<Callbacks["fetchUrlUserInfo"]>>;
-type Checkpoint = { nodes: [string, NodeResult][]; userInfo: [string, NonNullable<InfoResult> | null][] };
-
-function resumableCallbacks(checkpoint: Checkpoint, live: Callbacks, budget: ExternalFetchBudget, lease: SubscriptionCronLease) {
-  const nodes = new Map(checkpoint.nodes);
-  const userInfo = new Map(checkpoint.userInfo);
-  const replayed = nodes.size + userInfo.size;
-  const callbacks: Callbacks = {
-    async fetchUrlNodes(source) {
-      const saved = nodes.get(source.id);
-      if (saved) return saved;
-      await lease.maintain();
-      // 一次节点回调可能发出全部 UA 请求及一次补充 HEAD，且每个请求可能重定向。
-      // 先确认整段能运行，确保打断时只有已完成的结果可重放，不会从同一个请求中途反复重来。
-      const supplemental = source.userinfoUrl || source.userinfoUserAgent ? 1 : 0;
-      if (budget.remaining < (SUBSCRIPTION_MAX_PROFILE_REQUESTS + supplemental) * MAX_FETCHES_PER_REQUEST) {
-        throw new ExternalFetchBudgetExceededError();
-      }
-      const result = await live.fetchUrlNodes(source);
-      budget.throwIfDenied();
-      nodes.set(source.id, result);
-      return result;
-    },
-    async fetchUrlUserInfo(source) {
-      if (!source.userinfoUrl) return undefined;
-      if (userInfo.has(source.id)) return userInfo.get(source.id) ?? undefined;
-      await lease.maintain();
-      if (budget.remaining < MAX_FETCHES_PER_REQUEST) throw new ExternalFetchBudgetExceededError();
-      const result = await live.fetchUrlUserInfo(source);
-      budget.throwIfDenied();
-      userInfo.set(source.id, result ?? null);
-      return result;
-    },
-  };
-  return {
-    callbacks,
-    progressed: () => nodes.size + userInfo.size > replayed,
-    serialize: () => JSON.stringify({ nodes: [...nodes], userInfo: [...userInfo] } satisfies Checkpoint),
-  };
-}
-
 type RefreshResult =
   | { kind: "finished"; outcome?: CronUpdateOutcome }
   | { kind: "storage_limit" }
   | { kind: "budget_deferred"; progressed: boolean };
 
-async function refreshOne(env: WorkerBindings, lease: SubscriptionCronLease, row: SubscriptionRow, username: string,
-  key: string, live: Callbacks, budget: ExternalFetchBudget): Promise<RefreshResult> {
+async function refreshOne(env: WorkerBindings, lease: SubscriptionRefreshLease, row: SubscriptionRow, username: string,
+  key: string, live: ReturnType<typeof buildSubscriptionFetchCallbacks>, budget: ExternalFetchBudget): Promise<RefreshResult> {
   const state = resolveSubscriptionAutoUpdateState(row);
   const target = { id: row.id, name: row.name, userId: row.ownerId, username, autoUpdateInterval: row.autoUpdateInterval };
   const attemptedAt = new Date(nowMs(env));
-  const ciphertext = await readCronCheckpoint(env, row);
-  const checkpoint: Checkpoint = ciphertext ? JSON.parse(decryptEncryptedFieldV2(ciphertext, key)) : { nodes: [], userInfo: [] };
-  const replay = resumableCallbacks(checkpoint, live, budget, lease);
+  const ciphertext = await readRefreshCheckpoint(env, row);
+  const checkpoint: RefreshCheckpoint = ciphertext ? JSON.parse(decryptEncryptedFieldV2(ciphertext, key)) : { nodes: [], userInfo: [] };
+  const replay = replaySubscriptionRefreshCallbacks(checkpoint, live, budget, lease.maintain);
   async function markStorageLimit(): Promise<RefreshResult> {
-    return await writeCronCheckpoint(env, lease, row, null) === "storage_limit" ? { kind: "storage_limit" } : { kind: "finished" };
+    return await writeRefreshCheckpoint(env, lease, row, null) === "storage_limit" ? { kind: "storage_limit" } : { kind: "finished" };
   }
   let requestedHosts: string[] = [];
   let prepared: Awaited<ReturnType<typeof prepareSubscriptionRefresh>>;
@@ -94,7 +51,7 @@ async function refreshOne(env: WorkerBindings, lease: SubscriptionCronLease, row
     if (error instanceof SubscriptionCronLeaseLostError) throw error;
     if (error instanceof ExternalFetchBudgetExceededError) {
       if (!replay.progressed()) return { kind: "budget_deferred", progressed: false };
-      const result = await writeCronCheckpoint(env, lease, row, encryptEncryptedFieldV2(replay.serialize(), key));
+      const result = await writeRefreshCheckpoint(env, lease, row, encryptEncryptedFieldV2(JSON.stringify(replay.checkpoint()), key));
       if (result === "storage_limit") return { kind: "storage_limit" };
       if (result === "stale") return { kind: "finished" };
       return { kind: "budget_deferred", progressed: true };
@@ -132,7 +89,7 @@ async function refreshOne(env: WorkerBindings, lease: SubscriptionCronLease, row
  * @throws 租约失效或 D1 请求失败时抛出。
  */
 export async function runSubscriptionCron(env: WorkerBindings, key: string, budget: ExternalFetchBudget) {
-  const lease = await acquireSubscriptionCronLease(env);
+  const lease = await acquireSubscriptionRefreshLease(env);
   if (!lease) return { success: true, skipped: true, reason: "already_running" } as const;
   try {
     const limit = batchSize(env.CRON_BATCH_SIZE);

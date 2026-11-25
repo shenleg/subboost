@@ -117,3 +117,28 @@ it("限制上传体积并用上游模板校验拒绝非法配置", async () => {
   expect((await fixture.request("/api/templates?id=builtin-minimal", { method: "DELETE", headers })).status).toBe(404);
   expect((await fixture.request("/api/templates", { method: "DELETE", headers })).status).toBe(400);
 });
+
+/** 请求仍小于 4 MiB 时，按加密后整行的实际 UTF-8 字节限制保存。 */
+it("加密后过大的模板返回 413，且不写入模板库", async () => {
+  await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "fixture-template-key" } });
+  const setup = await fixture.request("/api/setup/admin", {
+    method: "POST",
+    body: JSON.stringify({ username: "admin", password: "fixture-password", passwordConfirm: "fixture-password" }),
+  });
+  expect(setup.status).toBe(200);
+  const headers = { Cookie: setup.headers.get("Set-Cookie")!.split(";")[0] };
+  const builtin = await fixture.request("/api/templates/builtin-minimal");
+  const { template: { config } } = await builtin.json<{ template: { config: object } }>();
+  const upload = (name: string, length: number) => fixture.request("/api/templates", { method: "POST", headers,
+    body: JSON.stringify({ name, config: { ...config, customProxyGroups: [
+      { id: "test", name: "测试组", emoji: "", groupType: "select", description: "中".repeat(length) },
+    ] } }) });
+
+  expect((await upload("可保存", 320_000)).status).toBe(201);
+  const oversized = await upload("超过存储上限", 340_000);
+  expect(oversized.status).toBe(413);
+  await expect(oversized.json()).resolves.toMatchObject({ code: "PAYLOAD_TOO_LARGE", error: expect.stringMatching(/D1.*2 MB/) });
+  const list = await fixture.request("/api/templates?type=my", { headers });
+  const { templates } = await list.json<{ templates: { name: string }[] }>();
+  expect(templates.map(({ name }) => name)).toEqual(["可保存"]);
+});

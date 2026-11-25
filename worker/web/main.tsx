@@ -14,7 +14,7 @@ import { version } from "../../package.json";
 import { useWorkerAuthState } from "./auth-state";
 
 const HomePage = lazy(() => import("../../local/app/page"));
-const DashboardPage = lazy(() => import("../../local/app/dashboard/page"));
+const DashboardPage = lazy(() => import("./dashboard"));
 const TemplatesPage = lazy(() => import("../../local/app/templates/page"));
 const LoginPage = lazy(() => import("./login"));
 const SettingsPage = lazy(() => import("./settings"));

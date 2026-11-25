@@ -1,4 +1,6 @@
-// 将 Worker 出站传输接到共享订阅刷新核心，供手动和后续 Cron 装配。
+// 将 Worker 出站传输接到共享订阅刷新核心，供手动刷新和 Cron 共用。
+import { SUBSCRIPTION_MAX_PROFILE_REQUESTS } from "@subboost/server-core/subscription/snapshot-comparison";
+import { ExternalFetchBudgetExceededError, MAX_FETCHES_PER_REQUEST, type ExternalFetchBudget } from "./transport";
 import {
   prepareRefreshCacheResult, refreshNodeSnapshot, SUBSCRIPTION_IMPORT_USER_AGENTS,
   type RefreshNodeSnapshotOptions,
@@ -53,4 +55,58 @@ export async function prepareSubscriptionRefresh(secrets: SubscriptionSecrets, c
   const snapshot = await refreshNodeSnapshot({ config: secrets.config, urls: secrets.urls, storedNodes: secrets.nodes, ...callbacks });
   const refreshResult = prepareRefreshCacheResult({ config: secrets.config, snapshot, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
   return { snapshot, refreshResult };
+}
+
+type Callbacks = ReturnType<typeof buildSubscriptionFetchCallbacks>;
+type NodeResult = Awaited<ReturnType<Callbacks["fetchUrlNodes"]>>;
+type InfoResult = Awaited<ReturnType<Callbacks["fetchUrlUserInfo"]>>;
+/** 保存已完成回调的结果，以便下一调用重放而无需再次回源。 */
+export type RefreshCheckpoint = { nodes: [string, NodeResult][]; userInfo: [string, NonNullable<InfoResult> | null][] };
+
+/**
+ * 只在能完成单个回调时开始回源，确保退出预算时拥有可重放的结果。
+ * @param checkpoint 当前订阅版本已完成的回调结果。
+ * @param live 未完成的回调使用的外部传输适配。
+ * @param budget 本次 Worker 调用剩余的外部子请求额度。
+ * @param maintainLease 回源前检查或续期本次刷新租约。
+ * @returns 计量回调及供调用者持久化进度的接口。
+ * @throws 返回的回调在预算或租约失效时抛出，由调用者处理。
+ */
+export function replaySubscriptionRefreshCallbacks(checkpoint: RefreshCheckpoint, live: Callbacks, budget: ExternalFetchBudget,
+  maintainLease: () => Promise<void>) {
+  const nodes = new Map(checkpoint.nodes);
+  const userInfo = new Map(checkpoint.userInfo);
+  const replayed = nodes.size + userInfo.size;
+  const callbacks: Callbacks = {
+    async fetchUrlNodes(source) {
+      const saved = nodes.get(source.id);
+      if (saved) return saved;
+      await maintainLease();
+      // 一次节点回调可能发出全部 UA 请求及一次补充 HEAD，且每个请求可能重定向。
+      // 先确认整段能运行，确保打断时只有已完成的结果可重放，不会从同一个请求中途反复重来。
+      const supplemental = source.userinfoUrl || source.userinfoUserAgent ? 1 : 0;
+      if (budget.remaining < (SUBSCRIPTION_MAX_PROFILE_REQUESTS + supplemental) * MAX_FETCHES_PER_REQUEST) {
+        throw new ExternalFetchBudgetExceededError();
+      }
+      const result = await live.fetchUrlNodes(source);
+      budget.throwIfDenied();
+      nodes.set(source.id, result);
+      return result;
+    },
+    async fetchUrlUserInfo(source) {
+      if (!source.userinfoUrl) return undefined;
+      if (userInfo.has(source.id)) return userInfo.get(source.id) ?? undefined;
+      await maintainLease();
+      if (budget.remaining < MAX_FETCHES_PER_REQUEST) throw new ExternalFetchBudgetExceededError();
+      const result = await live.fetchUrlUserInfo(source);
+      budget.throwIfDenied();
+      userInfo.set(source.id, result ?? null);
+      return result;
+    },
+  };
+  return {
+    callbacks,
+    progressed: () => nodes.size + userInfo.size > replayed,
+    checkpoint: () => ({ nodes: [...nodes], userInfo: [...userInfo] } satisfies RefreshCheckpoint),
+  };
 }

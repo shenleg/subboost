@@ -1,5 +1,6 @@
 // 管理员初始化、登录状态与供其他 Worker 路由使用的认证守卫。
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { readJsonBody } from "@subboost/server-core/http";
 import { Hono, type Context } from "hono";
 import { ENCRYPTION_KEY_MISSING, getClientIp, getEncryptionKey, nowMs, type WorkerApp, type WorkerBindings } from "../env";
 import { clearSession, issueSession, verifySession } from "../session";
@@ -12,6 +13,9 @@ const AUTH_BODY_LIMIT = 64 * 1024;
 const MIN_PASSWORD_LENGTH = 10;
 // ADR-0003 选择 Workerd 默认允许的最高轮数；使用原生实现避免纯 JS 哈希超限。
 const PASSWORD_ROUNDS = 100_000;
+// v1 持久化格式：128 位随机盐和 SHA-256 原生输出长度。
+const PASSWORD_SALT_BYTES = 16;
+const PASSWORD_HASH_BYTES = 32;
 const PASSWORD_FORMAT = `pbkdf2-sha256$v1$${PASSWORD_ROUNDS}`;
 const encoder = new TextEncoder();
 const adminExists = "已有管理员账号，请直接登录";
@@ -61,34 +65,11 @@ function stringField(body: unknown, key: string): string {
 }
 
 async function parseCredentials(c: AuthContext, invalidJson = "Invalid JSON body.") {
-  const request = c.req.raw;
-  const tooLarge = () => apiError(c, "Request body is too large.", "PAYLOAD_TOO_LARGE", 413);
-  if (Number(request.headers.get("Content-Length")) > AUTH_BODY_LIMIT) return tooLarge();
-  const reader = request.body?.getReader();
-  let body: unknown;
-  if (reader) {
-    // 即使没有长度头，也只读取有上限的请求体；客户端可省略 Content-Length。
-    const bytes = new Uint8Array(AUTH_BODY_LIMIT);
-    let size = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (size + value.byteLength > AUTH_BODY_LIMIT) {
-          void reader.cancel().catch(() => undefined);
-          return tooLarge();
-        }
-        bytes.set(value, size);
-        size += value.byteLength;
-      }
-      const raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, size));
-      body = raw.trim() ? JSON.parse(raw) : {};
-    } catch {
-      return apiError(c, invalidJson, "BAD_REQUEST", 400);
-    } finally {
-      reader.releaseLock();
-    }
-  }
+  const parsed = await readJsonBody(c.req.raw, AUTH_BODY_LIMIT);
+  if (!parsed.ok) return parsed.reason === "too_large"
+    ? apiError(c, "Request body is too large.", "PAYLOAD_TOO_LARGE", 413)
+    : apiError(c, invalidJson, "BAD_REQUEST", 400);
+  const body = parsed.value;
   return {
     username: stringField(body, "username"),
     password: stringField(body, "password"),
@@ -98,13 +79,13 @@ async function parseCredentials(c: AuthContext, invalidJson = "Invalid JSON body
 
 async function derivePassword(password: string, salt: Uint8Array<ArrayBuffer>) {
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: PASSWORD_ROUNDS }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: PASSWORD_ROUNDS }, key, PASSWORD_HASH_BYTES * 8);
   return new Uint8Array(bits);
 }
 
 async function hashPassword(password: string): Promise<string> {
   // 128 位随机盐确保相同密码也有不同哈希；格式前缀允许独立升级哈希参数。
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES));
   const hash = await derivePassword(password, salt);
   // Workerd 与项目支持的 Node 24 都提供 btoa；后者尚无 TypedArray Base64 API。
   return `${PASSWORD_FORMAT}$${btoa(String.fromCharCode(...salt))}$${btoa(String.fromCharCode(...hash))}`;
@@ -120,7 +101,7 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
   } catch {
     return false;
   }
-  if (salt.byteLength !== 16 || expected.byteLength !== 32) return false;
+  if (salt.byteLength !== PASSWORD_SALT_BYTES || expected.byteLength !== PASSWORD_HASH_BYTES) return false;
   return timingSafeEqual(await derivePassword(password, salt), expected);
 }
 

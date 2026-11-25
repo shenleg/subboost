@@ -44,3 +44,11 @@ it("配置密钥但未迁移 D1 时返回 503", async () => {
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ ok: false, database: "unavailable" });
 });
+
+/** 在初始迁移已完成但缺少刷新运行表时拒绝报告就绪。 */
+it.each([1, 2])("配置密钥但仅应用前 %i 份迁移时返回 503", async (count) => {
+  await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "test-key" }, migrate: count });
+  const response = await fixture.request("/api/health/ready");
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ ok: false, database: "unavailable" });
+});

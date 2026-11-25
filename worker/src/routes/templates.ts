@@ -5,13 +5,17 @@ import { builtinIdToType, getBuiltinTemplateId, getBuiltinTemplateSummaryMetadat
 import { validateSubBoostTemplateConfig } from "@subboost/core/templates/config-template";
 import type { SubBoostTemplateConfig } from "@subboost/core/types/template-config";
 import { decryptEncryptedFieldV2, encryptEncryptedFieldV2 } from "@subboost/server-core/crypto";
+import { readJsonBody } from "@subboost/server-core/http";
 import { parseCurrentTemplateTab } from "@subboost/server-core/templates";
 import { Hono } from "hono";
 import { getEncryptionKey, nowMs, type WorkerApp } from "../env";
 import { withCurrentAdmin } from "./auth";
 
-// 保持原版的上传大小和模板元数据限制。
+// 保留原版请求上限；经校验的配置另受 D1 整行上限约束。
 const TEMPLATE_BODY_LIMIT = 4 * 1024 * 1024;
+const D1_ROW_BYTES = 2_000_000;
+// 时间戳与 SQLite 记录头不在下方的字符串字节计量内，预留固定空间。
+const D1_ROW_OVERHEAD_BYTES = 256;
 const NAME_LIMIT = 100;
 const DESCRIPTION_LIMIT = 500;
 const NOT_FOUND = { error: "Template not found.", code: "NOT_FOUND" } as const;
@@ -44,37 +48,6 @@ function privateSummary(row: TemplateMetadata, config: SubBoostTemplateConfig) {
 
 function decryptConfig(row: TemplateRow, key: string): SubBoostTemplateConfig {
   return JSON.parse(decryptEncryptedFieldV2(row.encryptedConfig, key));
-}
-
-async function readUploadBody(request: Request): Promise<
-  { ok: true; value: unknown } | { ok: false; reason: "invalid_json" | "too_large" }
-> {
-  if (Number(request.headers.get("Content-Length")) > TEMPLATE_BODY_LIMIT) return { ok: false, reason: "too_large" };
-  const reader = request.body?.getReader();
-  if (!reader) return { ok: true, value: {} };
-  // 不能只信任长度头；按原始字节计数，避免没有长度头的请求超出同一配额。
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
-  const chunks: string[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > TEMPLATE_BODY_LIMIT) {
-        void reader.cancel().catch(() => undefined);
-        return { ok: false, reason: "too_large" };
-      }
-      chunks.push(decoder.decode(value, { stream: true }));
-    }
-    chunks.push(decoder.decode());
-    const text = chunks.join("");
-    return { ok: true, value: text.trim() ? JSON.parse(text) : {} };
-  } catch {
-    return { ok: false, reason: "invalid_json" };
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 function builtinSummaries() {
@@ -152,7 +125,7 @@ export const templateRoutes = new Hono<WorkerApp>()
     });
   })
   .post("/templates", (c) => withCurrentAdmin(c, async ({ id: ownerId }) => {
-    const parsed = await readUploadBody(c.req.raw);
+    const parsed = await readJsonBody(c.req.raw, TEMPLATE_BODY_LIMIT);
     if (!parsed.ok && parsed.reason === "too_large") {
       return c.json({ error: "Request body is too large.", code: "PAYLOAD_TOO_LARGE" }, 413);
     }
@@ -168,6 +141,12 @@ export const templateRoutes = new Hono<WorkerApp>()
     const row = { id: crypto.randomUUID(), name, description, createdAt: nowMs(c.env) };
     try {
       const encrypted = encryptEncryptedFieldV2(JSON.stringify(validated.config), getEncryptionKey(c.env)!);
+      // v2 密文是 ASCII；其余字段需要按 UTF-8 计量，不能用 JS 字符数估计。
+      const rowBytes = encrypted.length + Buffer.byteLength(row.id + ownerId + name + description) + D1_ROW_OVERHEAD_BYTES;
+      if (rowBytes > D1_ROW_BYTES) return c.json({
+        error: "模板加密后超过 Cloudflare D1 单行存储上限（2 MB），请缩小模板配置。",
+        code: "PAYLOAD_TOO_LARGE",
+      }, 413);
       await c.env.DB.prepare(`
         INSERT INTO LocalTemplate (id, ownerId, name, description, encryptedConfig, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?)

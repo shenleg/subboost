@@ -19,7 +19,7 @@
     "worker:dry-run": "node worker/scripts/check-bundle.mjs",
     "worker:test": "npm --workspace @subboost/worker run test",
     "worker:typecheck": "npm --workspace @subboost/worker run typecheck",
-    "check:worker": "npm run worker:typecheck && npm run worker:test && npm run build && npm run worker:dry-run && npm run local:db:generate && vitest run --config vitest.coverage.ts",
+    "check:worker": "npm run worker:typecheck && npm run worker:test && npm run build && npm --workspace @subboost/worker run test:spa:built && npm run worker:dry-run && npm run local:db:generate && vitest run --config vitest.coverage.ts",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --config vitest.coverage.ts --coverage",
     "test:core": "vitest run --config vitest.core.config.ts",

@@ -2,7 +2,12 @@
 import { expect, it } from "vitest";
 import { createWorkerFixture } from "./fixture";
 
-/** 创建真实管理员会话；返回请求头，初始化失败时断言报错。 */
+/**
+ * 创建真实管理员会话。
+ * @param request 当前 Worker 的 HTTP 请求入口。
+ * @returns 已认证的 JSON 请求头。
+ * @throws 初始化失败时断言报错。
+ */
 async function adminHeaders(request: Awaited<ReturnType<typeof createWorkerFixture>>["request"]) {
   const response = await request("/api/setup/admin", {
     method: "POST",
@@ -13,6 +18,7 @@ async function adminHeaders(request: Awaited<ReturnType<typeof createWorkerFixtu
   return { Cookie: response.headers.get("Set-Cookie")!.split(";")[0], "Content-Type": "application/json" };
 }
 
+/** 仅授权管理员能更改订阅源设置，且设置值必须为布尔值。 */
 it("要求管理员会话，且严格校验并持久化订阅源设置", async () => {
   await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "subscription-test" } });
   const path = "/api/settings/source-import";
@@ -27,6 +33,7 @@ it("要求管理员会话，且严格校验并持久化订阅源设置", async (
   expect(await (await fixture.request(path, { headers })).json()).toEqual({ allowUnsafeSubscriptionSources: true });
 });
 
+/** 管理员设置不能绕过 Worker 的地址限制。 */
 it("导入远程节点及流量头，开启设置仍不允许重定向到私网", async () => {
   const source = "https://source.example/nodes";
   const calls: string[] = [];
@@ -59,7 +66,14 @@ it("导入远程节点及流量头，开启设置仍不允许重定向到私网"
 const root = "/api/subscriptions";
 const node = { name: "Saved node", type: "ss", server: "saved.example", port: 443, cipher: "aes-128-gcm", password: "password" };
 
-/** 通过 HTTP 保存订阅；返回摘要，创建失败时断言报错。 */
+/**
+ * 通过 HTTP 保存订阅。
+ * @param request 当前 Worker 的 HTTP 请求入口。
+ * @param headers 管理员会话和 JSON 请求头。
+ * @param body 覆盖默认订阅字段。
+ * @returns 新订阅摘要及下载链接。
+ * @throws 创建失败时断言报错。
+ */
 async function createSubscription(request: Awaited<ReturnType<typeof createWorkerFixture>>["request"], headers: HeadersInit, body = {}) {
   const response = await request(root, { method: "POST", headers, body: JSON.stringify({ name: "Example", nodes: [node], ...body }) });
   expect(response.status).toBe(201);
@@ -67,6 +81,7 @@ async function createSubscription(request: Awaited<ReturnType<typeof createWorke
   return subscription;
 }
 
+/** 部分更新只替换指定字段，公开链接使用当前访问域名。 */
 it("订阅 CRUD 返回当前站点链接、保留未提交字段并替换配置", async () => {
   await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "subscription-test" } });
   expect((await fixture.request(root)).status).toBe(401);
@@ -87,6 +102,7 @@ it("订阅 CRUD 返回当前站点链接、保留未提交字段并替换配置"
   expect((await fixture.request(path, { headers })).status).toBe(404);
 });
 
+/** 验证客户端免登录获取配置与令牌失效。 */
 it("用公开令牌免登录下载 YAML 和 Clash 流量头，删除即失效", async () => {
   await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "subscription-test" } });
   const headers = await adminHeaders(fixture.request);
@@ -109,6 +125,7 @@ it("用公开令牌免登录下载 YAML 和 Clash 流量头，删除即失效", 
   expect((await fixture.request(subscriptionUrl)).status).toBe(404);
 });
 
+/** 版本校验只允许一项并发轮换。 */
 it("同一 If-Match 并发轮换只成功一次，旧公开令牌立即失效", async () => {
   await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "subscription-test" } });
   const headers = await adminHeaders(fixture.request);
@@ -128,6 +145,7 @@ it("同一 If-Match 并发轮换只成功一次，旧公开令牌立即失效", 
   expect((await fixture.request(rotated.subscription.subscriptionUrl)).status).toBe(200);
 });
 
+/** 全失败不得覆盖订阅，成功应发布节点和流量信息。 */
 it("手动刷新发布新节点与流量数据，来源全失败时保留缓存", async () => {
   let failing = false;
   await using fixture = await createWorkerFixture({ bindings: {
@@ -153,6 +171,7 @@ it("手动刷新发布新节点与流量数据，来源全失败时保留缓存"
   expect(await yaml.text()).toContain("fresh.example");
 });
 
+/** 只替换拉取成功的来源，保留失败来源的已有节点。 */
 it("部分来源失败时仍刷新成功来源，并保留失败来源的已有节点", async () => {
   let resync = false;
   await using fixture = await createWorkerFixture({ bindings: {
@@ -180,6 +199,7 @@ it("部分来源失败时仍刷新成功来源，并保留失败来源的已有�
   expect(yaml).not.toContain("old-a.example");
 });
 
+/** 即使时钟不前进，编辑过的版本也不能被旧刷新覆盖。 */
 it("刷新等待来源期间编辑同毫秒的快照，旧刷新不覆盖订阅或更新状态", async () => {
   const entered = Promise.withResolvers<void>();
   const allowed = Promise.withResolvers<void>();
@@ -201,6 +221,9 @@ it("刷新等待来源期间编辑同毫秒的快照，旧刷新不覆盖订阅�
   const refreshing = fixture.request(`${path}/refresh`, { method: "POST", headers });
   try {
     await entered.promise;
+    const duplicate = await fixture.request(`${path}/refresh`, { method: "POST", headers });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({ code: "SUBSCRIPTION_REFRESH_IN_PROGRESS" });
     const edit = await fixture.request(path, { method: "PUT", headers, body: '{"name":"Edited"}' });
     expect(edit.status).toBe(200);
   } finally {
@@ -222,6 +245,7 @@ it("刷新等待来源期间编辑同毫秒的快照，旧刷新不覆盖订阅�
   } });
 });
 
+/** 存储容量不足既不发布缓存，也不记为远程失败。 */
 it("加密快照超出 D1 整行上限时不覆盖缓存或失败计数", async () => {
   const now = Date.now();
   // 八个合法节点远低于节点配额，只有加密及整行叠加后超过 D1 限制。
@@ -250,13 +274,14 @@ it("加密快照超出 D1 整行上限时不覆盖缓存或失败计数", async 
   expect(await (await fixture.request(subscriptionUrl)).text()).toContain("saved.example");
 });
 
+/** 预算用完只保存内部检查点，不发布部分结果或改写自动刷新状态。 */
 it("耗尽实际出站子请求预算时不发布部分刷新结果", async () => {
-  let calls = 0;
+  const calls: string[] = [];
   await using fixture = await createWorkerFixture({ bindings: {
     ENCRYPTION_KEY: "subscription-test",
     fetch: async (input) => {
-      calls++;
       const url = new URL(String(input));
+      calls.push(url.pathname);
       if (url.pathname === "/good") return new Response("ss://YWVzLTEyOC1nY206cGFzcw@partial.example:443#Partial");
       const hop = Number(url.searchParams.get("hop") ?? 0);
       return hop < 3 ? new Response(null, { status: 302, headers: { Location: `?hop=${hop + 1}` } }) :
@@ -267,14 +292,110 @@ it("耗尽实际出站子请求预算时不发布部分刷新结果", async () =
   const urls = ["https://source.example/good", ...Array.from({ length: 14 }, (_, i) => `https://source.example/${i}`)];
   const { id, subscriptionUrl } = await createSubscription(fixture.request, headers, { urls });
   const response = await fixture.request(`${root}/${id}/refresh`, { method: "POST", headers });
-  expect(response.status).toBe(503);
-  expect(await response.json()).toMatchObject({ code: "EXTERNAL_FETCH_BUDGET_EXCEEDED" });
-  expect(calls).toBe(48);
+  expect(response.status).toBe(202);
+  const pending = await response.json<{ code: string; continuation: string }>();
+  expect(pending).toMatchObject({ code: "SUBSCRIPTION_REFRESH_PENDING", continuation: expect.any(String) });
+  expect(calls).toContain("/good");
+  expect(calls.length).toBeLessThanOrEqual(50);
   const yaml = await (await fixture.request(subscriptionUrl)).text();
   expect(yaml).toContain("saved.example");
   expect(yaml).not.toContain("partial.example");
+
+  // 客户端若没拿到首段响应，可重发相同 POST，已经抓到的成功来源不应重复抓取。
+  const start = calls.length;
+  const retry = await fixture.request(`${root}/${id}/refresh`, { method: "POST", headers });
+  expect(retry.status).toBe(202);
+  expect(calls.length - start).toBeGreaterThan(0);
+  expect(calls.length - start).toBeLessThanOrEqual(50);
+  expect(calls.slice(start)).not.toContain("/good");
+  const afterRetry = calls.length;
+  const replayed = await fixture.request(`${root}/${id}/refresh`, { method: "POST", headers: {
+    ...headers, "X-SubBoost-Refresh-Continuation": pending.continuation,
+  } });
+  expect(replayed.status).toBe(409);
+  expect(await replayed.json()).toMatchObject({ code: "SUBSCRIPTION_CHANGED" });
+  expect(calls).toHaveLength(afterRetry);
 });
 
+/** 普通源跨请求全部处理完，续跑不重复回源，也不提前修改快照与失败状态。 */
+it("在真实 D1 跨请求续跑 36 个普通源并保留终态响应契约", async () => {
+  const calls: string[] = [];
+  await using fixture = await createWorkerFixture({ bindings: {
+    ENCRYPTION_KEY: "subscription-test",
+    fetch: async (input) => {
+      const source = new URL(String(input)).pathname.slice(1);
+      calls.push(source);
+      return new Response(`ss://YWVzLTEyOC1nY206cGFzcw@new-${source}.example:443#New-${source}`);
+    },
+  } });
+  const headers = await adminHeaders(fixture.request);
+  const urls = Array.from({ length: 36 }, (_, i) => `https://source.example/${i}`);
+  const { id, subscriptionUrl } = await createSubscription(fixture.request, headers, { urls });
+  const path = `${root}/${id}`;
+  const before = await (await fixture.request(path, { headers })).json();
+  let continuation: string | undefined;
+  const processed = new Set<string>();
+  for (let call = 0; call < 10; call++) {
+    const start = calls.length;
+    const response = await fixture.request(`${path}/refresh`, { method: "POST", headers: {
+      ...headers, ...(continuation ? { "X-SubBoost-Refresh-Continuation": continuation } : {}),
+    } });
+    expect(calls.length - start).toBeLessThanOrEqual(50);
+    const visited = new Set(calls.slice(start));
+    for (const source of visited) {
+      expect(processed.has(source)).toBe(false);
+      processed.add(source);
+    }
+    if (response.status === 202) {
+      const pending = await response.json<{ code: string; continuation: string }>();
+      expect(pending).toMatchObject({ code: "SUBSCRIPTION_REFRESH_PENDING", continuation: expect.any(String) });
+      continuation = pending.continuation;
+      expect(await (await fixture.request(path, { headers })).json()).toEqual(before);
+      continue;
+    }
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, subscriptionId: id, nodeCount: 37 });
+    expect(continuation).toBeTruthy();
+    const yaml = await (await fixture.request(subscriptionUrl)).text();
+    for (let i = 0; i < urls.length; i++) expect(yaml).toContain(`new-${i}.example`);
+    expect(calls.length).toBeGreaterThanOrEqual(urls.length);
+    // UA 协商可对同一来源发多次请求；不同 HTTP 批次不应再次访问该来源。
+    expect([...new Set(calls)]).toEqual(urls.map((_, i) => String(i)));
+    return;
+  }
+  throw new Error("刷新在十次 HTTP 调用内未完成");
+});
+
+/** 旧阶段不能接续编辑后的版本，即使编辑和检查点发生在同一毫秒。 */
+it("订阅编辑后拒绝旧接续令牌，不回源也不发布缓存", async () => {
+  const now = Date.now();
+  let calls = 0;
+  await using fixture = await createWorkerFixture({ bindings: {
+    ENCRYPTION_KEY: "subscription-test", now: () => now,
+    fetch: async () => {
+      calls++;
+      return new Response("ss://YWVzLTEyOC1nY206cGFzcw@stale.example:443#Stale");
+    },
+  } });
+  const headers = await adminHeaders(fixture.request);
+  const urls = Array.from({ length: 36 }, (_, i) => `https://source.example/${i}`);
+  const { id, subscriptionUrl } = await createSubscription(fixture.request, headers, { urls });
+  const path = `${root}/${id}`;
+  const pending = await fixture.request(`${path}/refresh`, { method: "POST", headers });
+  expect(pending.status).toBe(202);
+  const { continuation } = await pending.json<{ continuation: string }>();
+  expect((await fixture.request(path, { method: "PUT", headers, body: '{"name":"Edited"}' })).status).toBe(200);
+  const before = calls;
+  const stale = await fixture.request(`${path}/refresh`, { method: "POST", headers: {
+    ...headers, "X-SubBoost-Refresh-Continuation": continuation,
+  } });
+  expect(stale.status).toBe(409);
+  expect(await stale.json()).toMatchObject({ code: "SUBSCRIPTION_CHANGED" });
+  expect(calls).toBe(before);
+  expect(await (await fixture.request(subscriptionUrl)).text()).not.toContain("stale.example");
+});
+
+/** 公共下载按令牌限制突发请求，下一窗口恢复。 */
 it("公开下载按令牌限流并在窗口结束后恢复", async () => {
   let now = Date.now();
   await using fixture = await createWorkerFixture({ bindings: { ENCRYPTION_KEY: "subscription-test", now: () => now } });
