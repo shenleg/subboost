@@ -22,8 +22,6 @@ import { withCurrentAdmin } from "./auth";
 
 const { owner, repo, ref } = RULE_PROVIDER_CONFIG.github;
 const indexKey = `${owner}/${repo}/${ref}`;
-const rootTreeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${ref}`;
-const recursiveTreeUrl = `${rootTreeUrl}?recursive=1`;
 
 // 沿用上游每小时 30 次；单管理员部署只需要一个桶，避免占用 D1 写额度。
 const DETECTION_WINDOW_MS = 60 * 60_000;
@@ -101,23 +99,7 @@ export async function refreshRuleIndex(
 }
 
 function catalogForIndex(index: RemoteRuleIndex, env: WorkerBindings, fetch: typeof globalThis.fetch) {
-  // 共享目录只接受 fetch 注入。回放两个 Git tree 响应，复用其搜索与候选算法，
-  // 不发真实子请求；由调用者保留 D1 快照的时间和来源，而非回放时间。
-  const fetchImpl: typeof globalThis.fetch = (input, init) => {
-    if (input === rootTreeUrl) return Promise.resolve(Response.json({ tree: [] }));
-    if (input === recursiveTreeUrl) {
-      const tree = (["geosite", "geoip"] as const).flatMap((type) =>
-        index[type].map((name) => ({ type: "blob", path: `${type}/${name}.mrs` })),
-      );
-      return Promise.resolve(Response.json({ tree }));
-    }
-    return fetch(input, init);
-  };
-  return createRuleCatalogService({ fetchImpl, now: () => nowMs(env) });
-}
-
-function indexFreshness({ fetchedAt, expiresAt, source }: RemoteRuleIndex) {
-  return { fetchedAt, expiresAt, source };
+  return createRuleCatalogService({ fetchImpl: fetch, now: () => nowMs(env), indexForQueries: () => index });
 }
 
 /** 挂在 `/api` 下的 `/rules/*` 路由。 */
@@ -132,8 +114,7 @@ export const ruleRoutes = new Hono<WorkerApp>().get("/rules/search", async (c) =
   const { fetch } = createExternalTransport(c.env);
   try {
     const index = await loadIndex(c.env, fetch);
-    const result = await catalogForIndex(index, c.env, fetch).searchRules(query);
-    return c.json({ ...result, ...indexFreshness(index) });
+    return c.json(await catalogForIndex(index, c.env, fetch).searchRules(query));
   } catch (error) {
     if (!(error instanceof RuleIndexUnavailableError)) throw error;
     return c.json({
@@ -153,15 +134,7 @@ export const ruleRoutes = new Hono<WorkerApp>().get("/rules/search", async (c) =
       ? catalogForIndex(index, c.env, fetch)
       : createRuleCatalogService({ fetchImpl: fetch, now: () => nowMs(c.env) });
     const result = await catalog.getCnRuleCandidateDiscovery(query);
-    if (!index) return c.json(buildCnRuleCandidateResponse(result, { debug }));
-    // 候选在任一来源过期时就已过期，包括拉取列表期间跨过索引过期时间。
-    const expiresAt = Math.min(index.expiresAt, result.expiresAt);
-    return c.json(buildCnRuleCandidateResponse({
-      ...result,
-      fetchedAt: Math.min(index.fetchedAt, result.fetchedAt),
-      expiresAt,
-      source: index.source === "stale" || result.source === "stale" || expiresAt <= nowMs(c.env) ? "stale" : "remote",
-    }, { debug }));
+    return c.json(buildCnRuleCandidateResponse(result, { debug }));
   } catch (error) {
     if (!(error instanceof RuleIndexUnavailableError)) throw error;
     return c.json(buildCnRuleCandidateUnavailableResponse(), 503);

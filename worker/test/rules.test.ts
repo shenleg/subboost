@@ -62,6 +62,22 @@ it("公开搜索首次回源，随后复用规则快照和分页契约", async (
   expect(fetch.mock.calls.map(([input]) => input)).toEqual([rootTree, geoTree]);
 });
 
+/** 缓存搜索保留跨类型排序和分页边界，不需要再次请求远程树。 */
+it("在同一规则快照中对 geosite 和 geoip 的重名规则分页", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input) => githubTree(input, [
+    "geoip/quest.mrs", "geosite/quest-extra.mrs", "geosite/quest.mrs",
+  ]));
+  await using fixture = await createWorkerFixture({ bindings: { fetch, now: () => start } });
+  for (const [page, id] of [[1, "quest"], [2, "quest-extra"], [3, "quest-ip"]] as const) {
+    const response = await fixture.request(`/api/rules/search?keyword=quest&type=all&size=1&page=${page}`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      page, totalMatched: 3, totalRules: 3, source: "remote", items: [{ id }],
+    });
+  }
+  expect(fetch.mock.calls.map(([input]) => input)).toEqual([rootTree, geoTree]);
+});
+
 /** 过期回源失败不覆盖 D1 快照；下一次成功回源应替换它。 */
 it("过期索引在回源失败时保留旧时间和规则，恢复后换成新索引", async () => {
   let now = start;

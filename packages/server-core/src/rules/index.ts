@@ -338,6 +338,11 @@ export function normalizeRuleSearchType(value: string | null | undefined): RuleS
   return value && isRuleSearchType(value) ? value : "all";
 }
 
+/**
+ * 建立规则目录的回源、缓存、搜索及候选发现接口。
+ * @param options 注入传输、时钟，或为查询提供已解析的索引快照。
+ * @returns 独立的规则目录；创建时不发出请求，查询或刷新时才报告回源错误。
+ */
 export function createRuleCatalogService(options: RuleCatalogServiceOptions = {}) {
   let cachedIndex: RemoteRuleIndex | null = null;
   let indexInflight: Promise<RemoteRuleIndex> | null = null;
@@ -416,6 +421,10 @@ export function createRuleCatalogService(options: RuleCatalogServiceOptions = {}
     }
   }
 
+  function getIndexForQuery(allowStale?: boolean) {
+    return options.indexForQueries?.() ?? getRemoteRuleIndex({ allowStale });
+  }
+
   async function searchRules(params: {
     keyword: string;
     type?: RuleSearchType;
@@ -427,7 +436,7 @@ export function createRuleCatalogService(options: RuleCatalogServiceOptions = {}
     const type = params.type ?? "all";
     const page = Math.max(1, Math.floor(params.page));
     const size = Math.max(1, Math.floor(params.size));
-    const index = await getRemoteRuleIndex({ allowStale: params.allowStale });
+    const index = await getIndexForQuery(params.allowStale);
     const totalRules = index.geosite.length + index.geoip.length;
 
     if (!keyword) {
@@ -521,7 +530,7 @@ export function createRuleCatalogService(options: RuleCatalogServiceOptions = {}
       };
     }
 
-    const index = await getRemoteRuleIndex({ allowStale: true });
+    const index = await getIndexForQuery(true);
     const geositeNames = toRuleSet(index, "geosite");
     const sourcesToFetch: Array<Omit<CnRuleCandidateSource, "lines">> = [];
     const seen = new Set<string>();

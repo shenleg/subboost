@@ -107,6 +107,8 @@ export type RuleCatalogServiceOptions = {
   cacheTtlMs?: number;
   userAgent?: string;
   getGitHubToken?: () => string | undefined;
+  // 持久化适配器可提供已带新鲜度信息的索引；远程抓取和索引更新不使用此接缝。
+  indexForQueries?: () => RemoteRuleIndex | Promise<RemoteRuleIndex>;
   logger?: Pick<Console, "warn" | "error" | "info">;
 };
 
