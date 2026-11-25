@@ -8,6 +8,10 @@ export type WorkerBindings = {
   LOCAL_SETUP_TOKEN?: string;
   APP_URL?: string;
   CRON_SECRET?: string;
+  /** 每次订阅 Cron 可处理的条数，默认 3，最多 5，以限制单次 D1 查询数。 */
+  CRON_BATCH_SIZE?: string;
+  /** 每次 Cron 的实际外部请求数，接受 20–50，默认 50。 */
+  CRON_FETCH_LIMIT?: string;
   RELEASE_REPO?: string;
   /** 可控时钟返回 Unix 毫秒。 */
   now?: () => number;
